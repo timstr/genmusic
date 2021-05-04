@@ -1,1 +1,5 @@
 *.jpg
+images/
+models/
+output/
+output_sound/

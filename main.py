@@ -325,6 +325,8 @@ def train(
     )
     assert len(real_sample_batches) == num_levels
 
+    initial_clip[:2].copy_(real_sample_batches[0][0])
+
     final_clip, fake_sample_batches, residuals = upsample_and_generate_audio(
         initial_clip=initial_clip, generators=generators, layer_size=layer_size
     )
@@ -369,33 +371,33 @@ def train(
             torch.mean(torch.square(real - fake[:, :2]))
         )
 
-    generator_fool_losses = []
-    for pred in discriminator_fake_predictions:
-        generator_fool_losses.append(torch.mean(torch.square(pred - 1.0)))
+    # generator_fool_losses = []
+    # for pred in discriminator_fake_predictions:
+    #     generator_fool_losses.append(torch.mean(torch.square(pred - 1.0)))
 
-    discriminator_real_losses = []
-    discriminator_fake_losses = []
-    for pred in discriminator_real_predictions:
-        discriminator_real_losses.append(torch.mean(torch.square(pred - 1.0)))
-    for pred in discriminator_fake_predictions:
-        discriminator_fake_losses.append(torch.mean(torch.square(pred)))
+    # discriminator_real_losses = []
+    # discriminator_fake_losses = []
+    # for pred in discriminator_real_predictions:
+    #     discriminator_real_losses.append(torch.mean(torch.square(pred - 1.0)))
+    # for pred in discriminator_fake_predictions:
+    #     discriminator_fake_losses.append(torch.mean(torch.square(pred)))
 
-    discriminator_losses = [
-        real_loss + fake_loss
-        for real_loss, fake_loss in zip(
-            discriminator_real_losses, discriminator_fake_losses
-        )
-    ]
+    # discriminator_losses = [
+    #     real_loss + fake_loss
+    #     for real_loss, fake_loss in zip(
+    #         discriminator_real_losses, discriminator_fake_losses
+    #     )
+    # ]
 
     total_loss = 0.0
 
     for i, g_reconst_loss in enumerate(generator_reconstruction_losses):
         total_loss += g_reconst_loss
 
-    for i, g_fool_loss in enumerate(generator_fool_losses):
-        total_loss += g_fool_loss
-    for i, d_loss in enumerate(discriminator_losses):
-        total_loss += d_loss
+    # for i, g_fool_loss in enumerate(generator_fool_losses):
+    #     total_loss += g_fool_loss
+    # for i, d_loss in enumerate(discriminator_losses):
+    #     total_loss += d_loss
 
     # total_loss += torch.mean(torch.square(final_clip[:2] - audio_clip))
 
@@ -412,8 +414,8 @@ def train(
     #     d_loss.backward(retain_graph=True)
     #     d_opt.step()
 
-    return generator_fool_losses, discriminator_losses, final_clip
-    # return generator_reconstruction_losses, generator_reconstruction_losses, final_clip
+    # return generator_fool_losses, discriminator_losses, final_clip
+    return generator_reconstruction_losses, generator_reconstruction_losses, final_clip
 
 
 def main():
@@ -444,21 +446,21 @@ def main():
     # sounddevice.play(audio.repeat(1, 10).permute(1, 0).numpy(), 32000)
     # time.sleep(10.0)
 
-    layer_size = 32
+    layer_size = 256
     # patch_size = 8192
     # patch_size = 16384
     # patch_size = 32768
     patch_size = 65536
-    num_features = 16
+    num_features = 32
 
     generators_and_discriminators, num_levels = make_networks(
         layer_size=layer_size,
         patch_size=patch_size,
         num_features=num_features,
         device="cuda",
-        kernel_size=15,
+        kernel_size=127,
     )
-    lr = 1e-3
+    lr = 1e-4
     optimizer = torch.optim.Adam(generators_and_discriminators.parameters(), lr=lr)
     # optimizer = torch.optim.SGD(generators_and_discriminators.parameters(), lr=lr)
     # generator_optimizers = make_optimizers(generators, lr=lr)
@@ -477,9 +479,6 @@ def main():
     all_generator_losses = [[] for _ in range(num_levels)]
     all_discriminator_losses = [[] for _ in range(num_levels)]
 
-    initial_clip = random_initial_clip(
-        num_features=num_features, layer_size=layer_size, device="cuda"
-    )
     for i in range(1_000_000):
         random_song = random.choice(songs)
         random_song_twice = random_song.repeat(1, 2)
@@ -487,6 +486,9 @@ def main():
         audio_clip = random_song_twice[
             :, random_start_time : random_start_time + patch_size
         ]
+        initial_clip = random_initial_clip(
+            num_features=num_features, layer_size=layer_size, device="cuda"
+        )
         audio_clip = audio_clip.to("cuda")
         generator_losses, discriminator_losses, output_clip = train(
             audio_clip=audio_clip,
@@ -509,7 +511,7 @@ def main():
         for i_d, d_loss in enumerate(discriminator_losses):
             all_discriminator_losses[i_d].append(d_loss.item())
 
-        time_to_plot = i % 2049 == 0
+        time_to_plot = i % 256 == 0
 
         if time_to_plot:
             ax_tl.cla()
@@ -555,7 +557,7 @@ def main():
             wf.write(
                 f"output_sound/output_{i}.wav",
                 32000,
-                clip_to_play.permute(1, 0).repeat(1, 4).cpu().numpy(),
+                clip_to_play.repeat(1, 4).permute(1, 0).cpu().numpy(),
             )
 
 
