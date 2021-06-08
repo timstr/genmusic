@@ -1,5 +1,9 @@
 *.jpg
 images/
 models/
+sound/
 output/
 output_sound/
+*.png
+*.flac
+*.wav
