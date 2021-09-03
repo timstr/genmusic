@@ -5,125 +5,31 @@ os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 import torch
 import torch.nn as nn
 import torch.fft as fft
-import torchaudio
-import numpy as np
 import matplotlib.pyplot as plt
 import random
-import glob
-import PIL
 import scipy.io.wavfile as wf
 import sys
-import scipy.signal
 
-
-def progress_bar(current, total, message):
-    if not sys.stdout.isatty():
-        return
-    i = current + 1
-    bar_fill = "=" * (i * 50 // total)
-    sys.stdout.write("\r[%-50s] %d/%d" % (bar_fill, i, total))
-    if (message is not None) and (len(message) > 0):
-        sys.stdout.write(" ")
-        sys.stdout.write(message)
-    if i == total:
-        sys.stdout.write("\n")
-    sys.stdout.flush()
+from util import is_power_of_2, plt_screenshot
+from audio_util import load_audio_clips, random_audio_batch, sane_audio_loss
+from torch_utils import (
+    Apply,
+    ConcatenateConstant,
+    make_conv_same,
+    make_positional_encoding,
+    save_module,
+)
+from progress_bar import progress_bar
+from signal_processing import (
+    cosine_window,
+    downsample_2x,
+    make_spectrogram,
+    upsample_2x,
+)
 
 
 convolution_padding_frequency_domain = "zeros"
 convolution_padding_time_domain = "circular"
-
-
-def make_spectrogram(x, normalize=True):
-    assert len(x.shape) == 2
-    assert x.shape[1] > x.shape[0]
-    sgs = []
-    for i in range(x.shape[0]):
-        xi = x[i]
-        _, _, sg = scipy.signal.spectrogram(
-            xi.detach().cpu().numpy(),
-            window="blackmanharris",
-            nperseg=256,
-            noverlap=128,
-        )
-        sg = np.log(np.clip(np.abs(sg), a_min=1e-6, a_max=128))
-        assert len(sg.shape) == 2
-        sgs.append(torch.tensor(sg))
-    spectrogram = torch.cat(sgs, dim=0).flip(0)
-    if normalize:
-        spectrogram_min = torch.min(spectrogram)
-        spectrogram_max = torch.max(spectrogram)
-        spectrogram = (spectrogram - spectrogram_min) / (
-            spectrogram_max - spectrogram_min
-        )
-    return spectrogram
-
-
-def save_module(the_module, filename):
-    print(f'Saving module to "{filename}"')
-    torch.save(the_module.state_dict(), filename)
-
-
-def restore_module(the_module, filename):
-    print('Restoring module from "{}"'.format(filename))
-    the_module.load_state_dict(torch.load(filename))
-
-
-def plt_screenshot(plt_figure):
-    pil_img = PIL.Image.frombytes(
-        "RGB", plt_figure.canvas.get_width_height(), plt_figure.canvas.tostring_rgb()
-    )
-    return pil_img
-
-
-def is_power_of_2(n):
-    assert isinstance(n, int)
-    return (n & (n - 1) == 0) and (n != 0)
-
-
-def cosine_window(size, device):
-    assert isinstance(size, int)
-    ls = torch.tensor(
-        np.linspace(0.0, 1.0, num=size, endpoint=False),
-        dtype=torch.float,
-        device=device,
-    )
-    assert ls.shape == (size,)
-    return 0.5 - 0.5 * torch.cos(ls * 2.0 * np.pi)
-
-
-def slice_along_dim(num_dims, dim, start=None, stop=None, step=None):
-    assert isinstance(num_dims, int)
-    begin = (slice(None),) * dim
-    middle = (slice(start, stop, step),)
-    end = (slice(None),) * (num_dims - dim - 1)
-    ret = begin + middle + end
-    assert len(ret) == num_dims
-    return ret
-
-
-def upsample_2x(x, dim):
-    assert isinstance(x, torch.Tensor)
-    assert isinstance(dim, int)
-    num_dims = len(x.shape)
-    assert dim < num_dims
-    N = x.shape[dim]
-    new_shape = list(x.shape)
-    new_shape[dim] = 2 * N
-    new_shape = tuple(new_shape)
-    out = torch.zeros(new_shape, dtype=x.dtype, device=x.device)
-    out[slice_along_dim(num_dims, dim, start=0, step=2)] = x
-    x_shift = torch.cat(
-        (
-            x[slice_along_dim(num_dims, dim, start=1)],
-            x[slice_along_dim(num_dims, dim, start=-1)],
-        ),
-        dim=dim,
-    )
-    assert x_shift.shape == x.shape
-    out[slice_along_dim(num_dims, dim, start=1, step=2)] = 0.5 * (x + x_shift)
-    return out
-    # return x.repeat_interleave(2, dim=dim)
 
 
 # hidden_activation_function = torch.relu
@@ -134,119 +40,6 @@ hidden_activation_function_generator = torch.nn.LeakyReLU()
 hidden_activation_function_discriminator = torch.nn.LeakyReLU()
 
 fft_norm = "ortho"
-
-
-def downsample_2x(x, dim):
-    assert isinstance(x, torch.Tensor)
-    assert isinstance(dim, int)
-    num_dims = len(x.shape)
-    assert dim < num_dims
-    evens = x[slice_along_dim(num_dims, dim, start=0, step=2)]
-    odds = x[slice_along_dim(num_dims, dim, start=1, step=2)]
-    return 0.5 * (evens + odds)
-
-
-def make_conv_same(in_channels, out_channels, kernel_size, padding_mode):
-    assert isinstance(in_channels, int)
-    assert isinstance(out_channels, int)
-    assert isinstance(kernel_size, int)
-    assert isinstance(padding_mode, str)
-    return nn.Conv1d(
-        in_channels=in_channels,
-        out_channels=out_channels,
-        kernel_size=kernel_size,
-        stride=1,
-        padding=((kernel_size - 1) // 2),
-        padding_mode=padding_mode,
-    )
-
-
-def make_conv_up(in_channels, out_channels, kernel_size, scale_factor):
-    assert scale_factor <= kernel_size
-    assert ((kernel_size - scale_factor) % 2) == 0
-    return nn.ConvTranspose1d(
-        in_channels=in_channels,
-        out_channels=out_channels,
-        kernel_size=kernel_size,
-        stride=scale_factor,
-        padding=((kernel_size - scale_factor) // 2),
-        output_padding=0,
-    )
-
-
-def make_conv_down(in_channels, out_channels, kernel_size):
-    assert kernel_size % 2 == 1
-    return (
-        nn.Conv1d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            stride=1,
-            padding=((kernel_size // 2) - 1),
-        ),
-    )
-
-
-def make_positional_encoding(num_channels, length, device):
-    assert isinstance(num_channels, int)
-    assert isinstance(length, int)
-    t = torch.tensor(
-        np.linspace(0.0, 1.0, num=length, endpoint=False),
-        dtype=torch.float,
-        device=device,
-    )
-    f = torch.tensor(
-        np.linspace(1.0, 1.0 + num_channels, num=num_channels, endpoint=False),
-        dtype=torch.float,
-        device=device,
-    )
-
-    tf = t.unsqueeze(0) * f.unsqueeze(1)
-    assert tf.shape == (num_channels, length)
-
-    pos_enc = torch.sin(np.pi * tf)
-
-    return pos_enc
-
-
-class WithNoise1d(nn.Module):
-    def __init__(self, num_features):
-        super(WithNoise1d, self).__init__()
-        assert isinstance(num_features, int)
-        self.num_features = num_features
-        self.weights = nn.parameter.Parameter(
-            torch.ones((num_features,), dtype=torch.float)
-        )
-
-    def forward(self, x):
-        assert isinstance(x, torch.Tensor)
-        B, F, N = x.shape
-        assert F == self.num_features
-        noise = -1.0 + 2.0 * torch.rand((B, F, N), dtype=x.dtype, device=x.device)
-        weight = self.weights.reshape(1, F, 1)
-        return x + weight * noise
-
-
-class ConcatenateConstant(nn.Module):
-    def __init__(self, constant):
-        super(ConcatenateConstant, self).__init__()
-        assert isinstance(constant, torch.Tensor)
-        assert len(constant.shape) == 2
-        self.constant = constant
-
-    def forward(self, x):
-        assert x.shape[2:] == self.constant.shape[1:]
-        B = x.shape[0]
-        return torch.cat((x, self.constant.unsqueeze(0).repeat(B, 1, 1)), dim=1)
-
-
-class Apply(nn.Module):
-    def __init__(self, fn):
-        super(Apply, self).__init__()
-        self.fn = fn
-
-    def forward(self, x):
-        return self.fn(x)
 
 
 def make_many_convs(
@@ -629,34 +422,6 @@ def make_networks(
 #     return torch.rand((num_features, layer_size), device=device)
 
 
-def random_training_batch(batch_size, patch_size, audio_clips):
-    assert isinstance(batch_size, int)
-    assert isinstance(patch_size, int)
-    assert isinstance(audio_clips, list)
-    clips_subset = []
-    for _ in range(batch_size):
-        random_clip, random_name = random.choice(audio_clips)
-        assert isinstance(random_clip, torch.Tensor)
-        assert len(random_clip.shape) == 2
-        assert random_clip.shape[0] == 2
-        assert isinstance(random_name, str)
-        clips_subset.append(random_clip)
-
-    clips_batch = torch.stack(clips_subset, dim=0).to("cuda")
-
-    assert len(clips_batch.shape) == 3
-    assert clips_batch.shape[:2] == (batch_size, 2)
-
-    N = clips_batch.shape[2]
-
-    random_crop_offset = random.randrange(0, N - patch_size)
-    clips_batch = clips_batch[
-        :, :, random_crop_offset : random_crop_offset + patch_size
-    ]
-
-    return clips_batch
-
-
 def downsample_many_times(clips_batch, layer_size, downsample_factor):
     assert isinstance(clips_batch, torch.Tensor)
     assert isinstance(layer_size, int)
@@ -992,14 +757,6 @@ def generate_full_audio_clip_batch(
     return clip[:, :2]  # , generated
 
 
-def sane_audio_loss(audio):
-    assert isinstance(audio, torch.Tensor)
-    mean = torch.mean(audio, dim=1, keepdim=True)
-    zero_mean_audio = audio - mean
-    mean_audio_amp = torch.mean(torch.abs(zero_mean_audio))
-    return torch.mean(torch.abs(mean)) + torch.clamp(mean_audio_amp - 0.05, min=0.0)
-
-
 def random_style_vector_batch(batch_size, num_style_features, device):
     return -1.0 + 2.0 * torch.rand(
         (
@@ -1014,6 +771,7 @@ def random_style_vector(num_style_features, device):
     return random_style_vector_batch(
         batch_size=1, num_style_features=num_style_features, device=device
     ).squeeze(0)
+
 
 def train(
     all_audio_clips,
@@ -1077,7 +835,7 @@ def train(
         training_generator = not training_discriminator
 
         with torch.no_grad():
-            training_clips_batch = random_training_batch(
+            training_clips_batch = random_audio_batch(
                 batch_size=parallel_batch_size,
                 patch_size=patch_size,
                 audio_clips=all_audio_clips,
@@ -1208,22 +966,10 @@ def train(
 
 
 def main():
-    songs = []
-    filenames = sorted(glob.glob("sound/*.flac"))
-    # filenames = sorted(glob.glob("sound/adventure of a lifetime*.flac"))
-    for i, filename in enumerate(filenames):
-        progress_bar(i, len(filenames), "songs loaded")
-        song_path, song_file = os.path.split(filename)
-        song_name, song_ext = song_file.split(".")
-        song_audio, sample_rate = torchaudio.load(filename)
-        if song_audio.shape != (2, 65536):
-            raise Exception(
-                f'The file "{filename}" needs to be 2-channel stereo and 65536 sample long.'
-            )
-        songs.append((song_audio, song_name))
+    songs = load_audio_clips("sound/*.flac")
     # audio, sample_rate = torchaudio.load("sound/die taube auf dem dach 1.flac")
     # audio, sample_rate = torchaudio.load("sound/the shark 1.flac")
-    audio_length = songs[0][0].shape[1]
+    # audio_length = songs[0][0].shape[1]
     # print(f"audio.shape : {audio.shape}")
     # print(f"sample_rate : {sample_rate}")
     # plt.plot(audio[1])

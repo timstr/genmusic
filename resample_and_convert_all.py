@@ -9,7 +9,7 @@ import numpy as np
 def main(source_path, target_path):
     filenames = list(sorted(glob.glob(f"{source_path}/*")))
     if len(filenames) == 0:
-        print(f"No files were found in \"{source_path}\"")
+        print(f'No files were found in "{source_path}"')
         return
     for fn in filenames:
         _, tail = os.path.split(fn)
@@ -30,7 +30,7 @@ def main(source_path, target_path):
         if max_amp >= max_permitted_amp:
             print(f"Warning: amplitude is too high and is being scaled")
             audio *= max_permitted_amp / max_amp
-            
+
         if length == 65536:
             print(f'copying "{fn}"')
             torchaudio.save(filepath=new_path, src=audio, sample_rate=32000)

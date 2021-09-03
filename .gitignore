@@ -7,3 +7,6 @@ output_sound/
 *.png
 *.flac
 *.wav
+init.sh
+__pycache__
+
