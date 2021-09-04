@@ -191,6 +191,8 @@ class Generator(nn.Module):
             input=x5,
             n_fft=self.window_size,
             window=self.window,
+            center=True,
+            pad_mode="circular",
             return_complex=False,
             onesided=True,
         )
@@ -271,6 +273,8 @@ class Discriminator(nn.Module):
             input=x2,
             n_fft=self.window_size,
             window=self.window,
+            center=True,
+            pad_mode="circular",
             return_complex=True,
             onesided=True,
         )
