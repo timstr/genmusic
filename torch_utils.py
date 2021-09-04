@@ -51,10 +51,10 @@ def make_conv_up(in_channels, out_channels, kernel_size, scale_factor):
     assert padding >= 0
     assert output_padding >= 0
     return nn.ConvTranspose1d(
-        in_channels=in_channels, # good
-        out_channels=out_channels, # good
-        kernel_size=kernel_size, # good
-        stride=scale_factor, # good
+        in_channels=in_channels,  # good
+        out_channels=out_channels,  # good
+        kernel_size=kernel_size,  # good
+        stride=scale_factor,  # good
         padding=padding,
         output_padding=output_padding,
     )
@@ -71,6 +71,7 @@ def make_conv_down(in_channels, out_channels, kernel_size, reduction_factor):
         stride=reduction_factor,
         padding=padding,
     )
+
 
 def make_positional_encoding(num_channels, length, device):
     assert isinstance(num_channels, int)
@@ -117,7 +118,6 @@ class ReshapeTensor(nn.Module):
         return x.view(B, *self._output_shape)
 
 
-
 class WithNoise1d(nn.Module):
     def __init__(self, num_features):
         super(WithNoise1d, self).__init__()
@@ -159,6 +159,7 @@ class Apply(nn.Module):
     def forward(self, x):
         return self.fn(x, *self.args, **self.kwargs)
 
+
 class FourierTransformLayer(nn.Module):
     def __init__(self, num_features, length):
         super(FourierTransformLayer, self).__init__()
@@ -172,27 +173,16 @@ class FourierTransformLayer(nn.Module):
         B = x.shape[0]
         assert_eq(x.shape, (B, self.num_features, self.length))
         x_fd = fft.rfft(x, n=self.length, dim=2, norm="ortho")
-        assert_eq(x_fd.shape, (
-            B,
-            self.num_features,
-            (self.length // 2 + 1)
-        ))
-        x_fd_but_without_the_nyquist = x_fd[:, :, :(self.length // 2)]
+        assert_eq(x_fd.shape, (B, self.num_features, (self.length // 2 + 1)))
+        x_fd_but_without_the_nyquist = x_fd[:, :, : (self.length // 2)]
         x_fd_real = torch.real(x_fd_but_without_the_nyquist)
         x_fd_imag = torch.imag(x_fd_but_without_the_nyquist)
-        assert_eq(x_fd_real.shape, (
-            B,
-            self.num_features,
-            (self.length // 2)
-        ))
-        assert_eq(x_fd_imag.shape, (
-            B,
-            self.num_features,
-            (self.length // 2)
-        ))
+        assert_eq(x_fd_real.shape, (B, self.num_features, (self.length // 2)))
+        assert_eq(x_fd_imag.shape, (B, self.num_features, (self.length // 2)))
         y = torch.cat((x_fd_real, x_fd_imag), dim=1)
         assert_eq(y.shape, (B, (self.num_features * 2), (self.length // 2)))
         return y
+
 
 class InverseFourierTransformLayer(nn.Module):
     def __init__(self, num_features, length):
@@ -208,16 +198,26 @@ class InverseFourierTransformLayer(nn.Module):
         assert_eq(x.shape, (B, self.num_features, self.length))
         x_with_nyquist = torch.cat((x, torch.zeros_like(x[:, :, :1])), dim=2)
         assert_eq(x_with_nyquist.shape, (B, self.num_features, self.length + 1))
-        x_real = x_with_nyquist[:, :(self.num_features // 2)]
-        x_imag = x_with_nyquist[:, (self.num_features // 2):]
-        x_complex = torch.complex(
-            real=x_real,
-            imag=x_imag
-        )
+        x_real = x_with_nyquist[:, : (self.num_features // 2)]
+        x_imag = x_with_nyquist[:, (self.num_features // 2) :]
+        x_complex = torch.complex(real=x_real, imag=x_imag)
         assert_eq(x_complex.shape, (B, self.num_features // 2, self.length + 1))
         x_td = fft.irfft(x_complex, n=(self.length * 2), dim=2, norm="ortho")
         assert_eq(x_td.shape, (B, (self.num_features // 2), (self.length * 2)))
         return x_td
+
+
+s_log_layers_enabled = False
+
+
+def enable_log_layers():
+    global s_log_layers_enabled
+    s_log_layers_enabled = True
+
+
+def disable_log_layers():
+    global s_log_layers_enabled
+    s_log_layers_enabled = False
 
 
 class Log(nn.Module):
@@ -228,11 +228,13 @@ class Log(nn.Module):
 
     def forward(self, x):
         assert isinstance(x, torch.Tensor)
-        print(f"Log Layer - {self._description}")
-        print(f"    Batch size:   {x.shape[0]}")
-        print(f"    Tensor shape: {x.shape[1:]}")
-        print("")
+        if s_log_layers_enabled:
+            print(f"Log Layer - {self._description}")
+            print(f"    Batch size:   {x.shape[0]}")
+            print(f"    Tensor shape: {x.shape[1:]}")
+            print("")
         return x
+
 
 class Upsample1d(nn.Module):
     def __init__(self, factor, mode="linear"):
@@ -250,8 +252,9 @@ class Upsample1d(nn.Module):
             size=(self.factor * N),
             mode=self.mode,
             # Dammit, pytorch
-            **({} if self.mode == "nearest" else {"align_corners": False})
+            **({} if self.mode == "nearest" else {"align_corners": False}),
         )
+
 
 class Downsample1d(nn.Module):
     def __init__(self, factor, mode="linear"):
@@ -270,15 +273,16 @@ class Downsample1d(nn.Module):
             size=(N // self.factor),
             mode=self.mode,
             # Dammit, pytorch
-            **({} if self.mode == "nearest" else {"align_corners": False})
+            **({} if self.mode == "nearest" else {"align_corners": False}),
         )
+
 
 class ResidualAdd(nn.Module):
     def __init__(self, model):
         super(ResidualAdd, self).__init__()
         assert isinstance(model, nn.Module)
         self.model = model
-    
+
     def forward(self, x):
         assert isinstance(x, torch.Tensor)
         B1, F1, N1 = x.shape
@@ -289,8 +293,4 @@ class ResidualAdd(nn.Module):
         if F1 > F2:
             return x[:, :F2] + y
         else:
-            return torch.cat([
-                x + y[:, :F1],
-                y[:, F1:]
-            ], dim=1)
-
+            return torch.cat([x + y[:, :F1], y[:, F1:]], dim=1)

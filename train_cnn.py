@@ -1,11 +1,11 @@
 import os
+from torch._C import device
+
+from torch.nn.modules.conv import Conv2d
 
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 
 import numpy as np
-from abc import ABCMeta, abstractmethod
-from typing import List, Tuple
-import sys
 import torch
 import torch.nn as nn
 import torchaudio
@@ -24,6 +24,7 @@ from torch_utils import (
     ResidualAdd,
     Upsample1d,
     WithNoise1d,
+    enable_log_layers,
     make_conv_down,
     make_conv_same,
     make_conv_up,
@@ -64,11 +65,6 @@ class LossPlotter:
 
     def plot_to(self, plt_axis):
         colour_dark = (self._colour_r, self._colour_g, self._colour_b)
-        colour_pale = (
-            0.75 + 0.25 * self._colour_r,
-            0.75 + 0.25 * self._colour_g,
-            0.75 + 0.25 * self._colour_b,
-        )
         if self._aggregation_interval > 1:
             x_min = self._aggregation_interval // 2
             x_stride = self._aggregation_interval
@@ -87,308 +83,195 @@ class LossPlotter:
             )
 
 
-class TensorShape:
-    def __init__(self, length, features: int):
-        assert isinstance(length, int) or (length is None)
-        assert isinstance(features, int)
-        self.length = length
-        self.features = features
+class Generator(nn.Module):
+    def __init__(self, num_latent_features):
+        super(Generator, self).__init__()
+        assert isinstance(num_latent_features, int)
 
-    def as_tuple(self):
-        if self.length is None:
-            return (self.features,)
-        else:
-            return (self.features, self.length)
+        self.num_latent_features = num_latent_features
 
-    def as_string(self):
-        return " x ".join([str(s) for s in self.as_tuple()])
-
-
-def assert_shape(x: torch.Tensor, s: TensorShape):
-    expected = s.as_tuple()
-    actual = x.shape[1:]
-    if actual != expected:
-        raise Exception(
-            f"Expected tensor to have shape {expected}, but got {actual} instead"
-        )
-
-
-class Operation(metaclass=ABCMeta):
-    @abstractmethod
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        raise Exception("Not implemented")
-
-
-class Convolution(Operation):
-    def __init__(self, kernel_size: int):
-        assert isinstance(kernel_size, int)
-        self.kernel_size = kernel_size
-
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        assert input_shape.length is not None
-        assert output_shape.length is not None
-        f0 = input_shape.features
-        n0 = input_shape.length
-        f1 = output_shape.features
-        n1 = output_shape.length
-        if n0 < n1:
-            assert (n1 % n0) == 0
-            scale_factor = n1 // n0
-            conv = make_conv_up(
-                in_channels=f0,
-                out_channels=f1,
-                kernel_size=self.kernel_size,
-                scale_factor=scale_factor,
-            )
-            desc = f"x {scale_factor} Dilated Convolution with kernel size {self.kernel_size}"
-        elif n0 == n1:
-            conv = make_conv_same(
-                in_channels=f0,
-                out_channels=f1,
-                kernel_size=self.kernel_size,
-                padding_mode="zeros",
-            )
-            desc = f"= Convolution with kernel size {self.kernel_size}"
-        elif n0 > n1:
-            assert (n0 % n1) == 0
-            reduction_factor = n0 // n1
-            conv = make_conv_down(
-                in_channels=f0,
-                out_channels=f1,
-                kernel_size=self.kernel_size,
-                reduction_factor=reduction_factor,
-            )
-            desc = (
-                f"/ {reduction_factor} Convolution with kernel size {self.kernel_size}"
-            )
-
-        if n0 > 1:
-            conv = nn.Sequential(nn.BatchNorm1d(num_features=f0), conv)
-        return conv, desc
-
-
-class ResidualConvolutionStack(Operation):
-    def __init__(self, kernel_size: int):
-        assert isinstance(kernel_size, int)
-        self.kernel_size = kernel_size
-
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        n_in = input_shape.length
-        f_in = input_shape.features
-        n_out = output_shape.length
-        f_out = output_shape.features
-        assert n_in == n_out
-        module = nn.Sequential(
-            nn.BatchNorm1d(num_features=f_in),
-            make_conv_same(
-                in_channels=f_in,
-                out_channels=f_out,
-                kernel_size=self.kernel_size,
-                padding_mode="circular",
-            ),
-            nn.BatchNorm1d(num_features=f_out),
-            # nn.ReLU(),
+        self.fully_connected = nn.Sequential(
+            Log("generator fully connected 0"),
+            nn.Linear(in_features=num_latent_features, out_features=256),
+            # nn.BatchNorm1d(num_features=256),
             nn.LeakyReLU(),
-            # Apply(torch.sin),
-            make_conv_same(
-                in_channels=f_out,
-                out_channels=f_out,
-                kernel_size=self.kernel_size,
-                padding_mode="circular",
+            Log("generator fully connected 1"),
+            nn.Linear(in_features=256, out_features=32 * 32 * 64),
+            Log("generator fully connected 2"),
+        )
+
+        self.spectral_convs = nn.Sequential(
+            Log("generator spectral conv 0"),
+            nn.ConvTranspose2d(
+                in_channels=32,
+                out_channels=32,
+                kernel_size=15,
+                stride=2,
+                padding=(6, 6),
             ),
-            WithNoise1d(num_features=f_out),
+            nn.BatchNorm2d(num_features=32),
+            nn.LeakyReLU(),
+            Log("generator spectral conv 1"),
+            nn.ConvTranspose2d(
+                in_channels=32,
+                out_channels=32,
+                kernel_size=15,
+                stride=2,
+                padding=(7, 7),
+            ),
+            nn.BatchNorm2d(num_features=32),
+            nn.LeakyReLU(),
+            Log("generator spectral conv 2"),
         )
-        return (
-            ResidualAdd(module),
-            f"Residual convolution with kernel size {self.kernel_size}",
+
+        self.window_size = 256
+
+        self.window = nn.parameter.Parameter(
+            data=torch.hann_window(self.window_size, periodic=True), requires_grad=False
         )
 
+        self.temporal_convs = nn.Sequential(
+            Log("generator temporal conv 0"),
+            nn.ConvTranspose1d(
+                in_channels=16,
+                out_channels=8,
+                kernel_size=32,
+                stride=2,
+                padding=15,
+            ),
+            nn.BatchNorm1d(num_features=8),
+            nn.LeakyReLU(),
+            Log("generator temporal conv 1"),
+            nn.ConvTranspose1d(
+                in_channels=8, out_channels=2, kernel_size=32, stride=2, padding=15
+            ),
+            Log("generator temporal conv 2"),
+        )
 
-class LinearTransform(Operation):
+    def forward(self, latent_codes):
+        B, D = latent_codes.shape
+        assert_eq(D, self.num_latent_features)
+
+        x0 = latent_codes
+        x1 = self.fully_connected(x0)
+        assert_eq(x1.shape, (B, 32 * 32 * 64))
+
+        x2 = x1.reshape(B, 32, 32, 64)
+
+        x3 = self.spectral_convs(x2)
+        assert_eq(x3.shape, (B, 32, 129, 257))
+
+        x4 = torch.complex(real=x3[:, :16], imag=x3[:, 16:])
+
+        assert_eq(x4.shape, (B, 16, 129, 257))
+        x5 = x4.reshape(B * 16, 129, 257)
+
+        x6 = torch.istft(
+            input=x5,
+            n_fft=self.window_size,
+            window=self.window,
+            return_complex=False,
+            onesided=True,
+        )
+        assert_eq(x6.shape, (B * 16, 16384))
+
+        x7 = x6.reshape(B, 16, 16384)
+        x8 = self.temporal_convs(x7)
+        assert_eq(x8.shape, (B, 2, 65536))
+
+        return x8
+
+
+class Discriminator(nn.Module):
     def __init__(self):
-        pass
+        super(Discriminator, self).__init__()
+        self.temporal_convs = nn.Sequential(
+            Log("discriminator temporal conv 0"),
+            nn.Conv1d(
+                in_channels=2, out_channels=8, kernel_size=31, stride=2, padding=15
+            ),
+            nn.BatchNorm1d(num_features=8),
+            nn.LeakyReLU(),
+            Log("discriminator temporal conv 1"),
+            nn.Conv1d(
+                in_channels=8, out_channels=16, kernel_size=31, stride=2, padding=15
+            ),
+            Log("discriminator temporal conv 2"),
+        )
 
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        assert input_shape.length is None
-        assert output_shape.length is None
-        f0 = input_shape.features
-        f1 = output_shape.features
-        return nn.Linear(in_features=f0, out_features=f1), "Linear"
+        self.window_size = 256
 
+        self.window = nn.parameter.Parameter(
+            data=torch.hann_window(self.window_size, periodic=True), requires_grad=False
+        )
 
-class Reshape(Operation):
-    def __init__(self):
-        pass
+        self.spectral_convs = nn.Sequential(
+            Log("discriminator spectral conv 0"),
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=32,
+                kernel_size=15,
+                stride=2,
+                padding=(6, 6),
+            ),
+            nn.BatchNorm2d(num_features=32),
+            nn.LeakyReLU(),
+            Log("discriminator spectral conv 1"),
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=32,
+                kernel_size=15,
+                stride=2,
+                padding=(7, 7),
+            ),
+            Log("discriminator spectral conv 2"),
+        )
 
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        return ReshapeTensor(input_shape.as_tuple(), output_shape.as_tuple()), "Reshape"
+        self.fully_connected = nn.Sequential(
+            Log("discriminator fully connected 1"),
+            nn.Linear(in_features=(32 * 32 * 64), out_features=256),
+            # nn.BatchNorm1d(num_features=256),
+            nn.LeakyReLU(),
+            Log("discriminator fully connected 2"),
+            nn.Linear(in_features=256, out_features=1),
+            Log("discriminator fully connected 3"),
+        )
 
+    def forward(self, audio_clips):
+        B, C, N = audio_clips.shape
+        assert_eq(C, 2)
+        assert_eq(N, 65536)
 
-class FourierTransform(Operation):
-    def __init__(self):
-        pass
+        x0 = audio_clips
+        x1 = self.temporal_convs(x0)
+        assert_eq(x1.shape, (B, 16, 16384))
+        x2 = x1.reshape(B * 16, 16384)
+        x3 = torch.stft(
+            input=x2,
+            n_fft=self.window_size,
+            window=self.window,
+            return_complex=True,
+            onesided=True,
+        )
+        assert_eq(x3.shape, (B * 16, 129, 257))
+        x4 = x3.reshape(B, 16, 129, 257)
+        x5 = torch.cat([torch.real(x4), torch.imag(x4)], dim=1)
+        assert_eq(x5.shape, (B, 32, 129, 257))
+        x6 = self.spectral_convs(x5)
+        assert_eq(x6.shape, (B, 32, 32, 64))
+        x7 = x6.reshape(B, 32 * 32 * 64)
+        x8 = self.fully_connected(x7)
+        assert_eq(x8.shape, (B, 1))
 
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        assert input_shape.length is not None
-        assert output_shape.length is not None
-        f0 = input_shape.features
-        n0 = input_shape.length
-        f1 = output_shape.features
-        n1 = output_shape.length
-        if n0 == n1 * 2:
-            # Forward
-            assert f1 == f0 * 2
-            return (
-                FourierTransformLayer(num_features=f0, length=n0),
-                "Fourier Transform",
-            )
-        elif n1 == n0 * 2:
-            # Backward
-            assert f0 == f1 * 2
-            return (
-                InverseFourierTransformLayer(num_features=f0, length=n0),
-                "Inverse Fourier Transform",
-            )
-        else:
-            raise Exception("Wat")
-
-
-known_activation_functions = {
-    "relu": nn.ReLU(),
-    "leaky relu": nn.LeakyReLU(),
-    "sigmoid": nn.Sigmoid(),
-    "tanh": nn.Tanh(),
-    "sin": Apply(torch.sin),
-}
-
-
-class ActivationFunction(Operation):
-    def __init__(self, name):
-        assert name in known_activation_functions.keys()
-        self.name = name
-
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        return known_activation_functions[self.name], self.name
-
-
-class AddNoise(Operation):
-    def __init__(self):
-        pass
-
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        assert output_shape.length is not None
-        return WithNoise1d(num_features=output_shape.features), "Add Noise"
+        return x8
 
 
-class Resample(Operation):
-    def __init__(self, mode):
-        assert mode in ["linear", "nearest", "bicubic"]
-        self.mode = mode
-        pass
-
-    def make_module(
-        self, input_shape: TensorShape, output_shape: TensorShape
-    ) -> Tuple[nn.Module, str]:
-        assert input_shape.features == output_shape.features
-        l_in = input_shape.length
-        l_out = output_shape.length
-        if l_in >= l_out:
-            assert l_in % l_out == 0
-            factor = l_in // l_out
-            return Downsample1d(factor=factor, mode=self.mode), f"{factor}x Downsample"
-        else:
-            assert l_out % l_in == 0
-            factor = l_out // l_in
-            return Upsample1d(factor=factor, mode=self.mode), f"{factor}x Upsample"
-
-
-class NeuralNetwork(nn.Module):
-    def __init__(self, name: str, stages):
-        super(NeuralNetwork, self).__init__()
-        self.name = name
-        self.sizes: List[TensorShape] = []
-
-        self.operations: List[List[Operation]] = []
-
-        assert isinstance(stages[0], TensorShape)
-        self.sizes.append(stages[0])
-        assert isinstance(stages[-1], TensorShape)
-        current_operations = []
-        for stage in stages[1:]:
-            if isinstance(stage, Operation):
-                current_operations.append(stage)
-            elif isinstance(stage, TensorShape):
-                assert len(current_operations) > 0
-                self.operations.append(current_operations)
-                current_operations = []
-                self.sizes.append(stage)
-
-        assert len(self.sizes) == (len(self.operations) + 1)
-
-        modules: List[nn.Module] = []
-        self.module_descriptions: List[List[str]] = []
-
-        for i, ops in enumerate(self.operations):
-            prev_size = self.sizes[i]
-            next_size = self.sizes[i + 1]
-            current_modules: List[nn.Module] = []
-            current_descriptions: List[str] = []
-            for op in ops:
-                module, description = op.make_module(prev_size, next_size)
-                current_modules.append(module)
-                current_descriptions.append(description)
-            modules.append(nn.Sequential(*current_modules))
-            self.module_descriptions.append(current_descriptions)
-        self.module_list = nn.Sequential(*modules)
-
-    def print_description(self):
-        horizontal_rule()
-        line()
-        line(self.name)
-        line()
-        initial_size = self.sizes[0]
-        line(f"[ {initial_size.as_string()} ]")
-        for i in range(len(self.module_list)):
-            prev_size = self.sizes[i]
-            next_size = self.sizes[i + 1]
-            for d in self.module_descriptions[i]:
-                line(d)
-            line(f"[ {next_size.as_string()} ]")
-        line()
-        horizontal_rule()
-        print()
-
-    def forward(self, x):
-        assert isinstance(x, torch.Tensor)
-
-        assert_shape(x, self.sizes[0])
-        # print("------------------")
-        for i, mods in enumerate(self.module_list):
-            prev_size = self.sizes[i]
-            next_size = self.sizes[i + 1]
-            for j, m in enumerate(mods):
-                # print(f"{x.shape} -> {self.module_descriptions[i][j]}")
-                x = m(x)
-                # print(f" -> {x.shape}")
-            assert_shape(x, next_size)
-
-        return x
+# HACK
+# d = Discriminator().cuda()
+# s = d(torch.rand((1, 2, 65536), device="cuda"))
+# g = Generator(num_latent_features=64).cuda()
+# a = g(torch.rand((1, 64), device="cuda"))
+# exit(-1)
 
 
 def random_initial_vector(batch_size, num_features):
@@ -398,169 +281,6 @@ def random_initial_vector(batch_size, num_features):
     # return -1.0 + 2.0 * torch.rand(
     #     (batch_size, num_features, num_samples), dtype=torch.float32, device="cuda"
     # )
-
-
-# class SimpleConvolutionalGenerator(nn.Module):
-#     def __init__(self, architecture):
-#         super(SimpleConvolutionalGenerator, self).__init__()
-#         assert isinstance(architecture, Architecture)
-
-#         modules = []
-
-#         self.architecture = architecture
-
-#         horizontal_rule()
-#         line("Generator Architecture")
-#         line()
-
-#         initial_shape = architecture.sizes[0]
-#         final_shape = architecture.sizes[-1]
-
-#         line(f"[ {initial_shape.features} x {initial_shape.length} ]")
-
-#         for i in range(len(architecture.operations)):
-#             f_prev, n_prev = architecture.sizes[i]
-#             f_next, n_next = architecture.sizes[i + 1]
-#             op = architecture.operations[i]
-#             # modules.append(Log(f"Layer {i} begin, expecting [{f_prev}, {n_prev}]"))
-#             assert_eq((n_next % n_prev), 0)
-#             if n_prev > 1:
-#                 line("Batch Normalization")
-#                 modules.append(nn.BatchNorm1d(num_features=f_prev))
-#             if isinstance(op, \Convolution):
-#                 line(f"x {n_next // n_prev} Dilated Convolution")
-#                 make_conv_up(
-#                     in_channels=f_prev,
-#                     out_channels=f_next,
-#                     kernel_size=k_prev,
-#                     # padding_mode="circular",
-#                     scale_factor=(n_next // n_prev),
-#                 )
-#             line("Noise")
-#             modules.append(WithNoise1d(num_features=f_next))
-#             if i + 1 < len(previous_and_next_params):
-#                 modules.append(hidden_activation_function_generator)
-#                 line("Activation Function")
-#             # modules.append(Log(f"Layer {i} end, expecting [{f_next}, {n_next}]"))
-#             line(f"[ {f_next} x {n_next} ]")
-
-#         line()
-#         horizontal_rule()
-#         flush()
-
-#         self.model = nn.Sequential(*modules)
-
-#     def forward(self, x):
-#         assert isinstance(x, torch.Tensor)
-#         B = x.shape[0]
-#         assert_eq(x.shape[1:], (self.initial_features, self.initial_samples))
-
-#         y = self.model(x)
-
-#         assert_eq(y.shape, (B, self.final_features, self.final_samples))
-
-#         return y
-
-
-# class SimpleConvolutionalDiscriminator(nn.Module):
-#     def __init__(self, features_lengths_kernel_sizes):
-#         super(SimpleConvolutionalDiscriminator, self).__init__()
-
-#         assert isinstance(features_lengths_kernel_sizes, list)
-#         assert all(
-#             [
-#                 (isinstance(f, int) and isinstance(n, int) and isinstance(k, int))
-#                 for (f, n, k) in features_lengths_kernel_sizes
-#             ]
-#         )
-
-#         modules = []
-
-#         f_0, n_0, _ = features_lengths_kernel_sizes[0]
-#         f_n, n_n, _ = features_lengths_kernel_sizes[-1]
-
-#         self.initial_features = f_0
-#         self.initial_samples = n_0
-#         self.final_features = f_n
-#         self.final_samples = n_n
-
-#         previous_and_next_params = zip(
-#             features_lengths_kernel_sizes, features_lengths_kernel_sizes[1:]
-#         )
-
-#         horizontal_rule()
-#         line("Discriminator Architecture")
-#         line()
-
-#         line(f"[ {f_0} x {n_0} ]")
-
-#         for i, ((fs_prev, fs_next)) in enumerate(previous_and_next_params):
-#             f_prev, n_prev, _ = fs_prev
-#             f_next, n_next, k_next = fs_next
-#             assert_eq((n_prev % n_next), 0)
-#             # modules.append(Log(f"Layer {i} begin, expecting [{f_prev}, {n_prev}]"))
-#             if n_prev > 1:
-#                 line("Batch Normalization")
-#                 modules.append(nn.BatchNorm1d(num_features=f_prev))
-#             line(f"/ {n_prev // n_next} Convolution")
-#             line("Activation Function")
-#             modules.extend(
-#                 [
-#                     # Downsample1d(factor=(n_prev // n_next)),
-#                     # make_conv_same(
-#                     make_conv_down(
-#                         in_channels=f_prev,
-#                         out_channels=f_next,
-#                         kernel_size=k_next,
-#                         # padding_mode="circular",
-#                         reduction_factor=(n_prev // n_next),
-#                     ),
-#                     hidden_activation_function_discriminator,
-#                 ]
-#             )
-#             # modules.append(Log(f"Layer {i} end, expecting [{f_next}, {n_next}]"))
-#             line(f"[ {f_next} x {n_next} ]")
-
-#         self.model = nn.Sequential(*modules)
-#         self.final = nn.Linear(in_features=(f_n * n_n), out_features=1)
-#         line("Reshape")
-#         line(f"[ {f_n * n_n} ]")
-#         line("Linear")
-#         line(f"[ {1} ]")
-
-#         line()
-#         horizontal_rule()
-#         flush()
-
-#     def forward(self, x):
-#         assert isinstance(x, torch.Tensor)
-#         B = x.shape[0]
-#         assert_eq(x.shape[1:], (self.initial_features, self.initial_samples))
-
-#         y = self.model(x)
-
-#         assert_eq(y.shape, (B, self.final_features, self.final_samples))
-
-#         y_flat = y.reshape(B, self.final_features * self.final_samples)
-
-#         z = self.final(y_flat)
-
-#         assert_eq(z.shape, (B, 1))
-
-#         return z
-
-
-# class GeneratorAndDiscriminator(nn.Module):
-#     def __init__(self, features_lengths_kernel_sizes):
-#         super(GeneratorAndDiscriminator, self).__init__()
-#         assert isinstance(features_lengths_kernel_sizes, list)
-#         self.generator = SimpleConvolutionalGenerator(features_lengths_kernel_sizes)
-#         features_lengths_kernel_sizes_reversed = list(
-#             features_lengths_kernel_sizes[::-1]
-#         )
-#         self.discriminator = SimpleConvolutionalDiscriminator(
-#             features_lengths_kernel_sizes_reversed
-#         )
 
 
 def train(
@@ -696,6 +416,8 @@ def train(
 
 
 def main():
+    # enable_log_layers()
+
     songs = load_audio_clips("sound/*.flac")
 
     # features_lengths_kernel_sizes = [
@@ -713,137 +435,20 @@ def main():
 
     latent_features = 64
 
-    # TODO:
-    # - read about torch.stft and torch.istft
-    #   https://pytorch.org/docs/stable/generated/torch.stft.html#torch.stft
-    #   https://pytorch.org/docs/stable/generated/torch.istft.html#torch.istft
-
-    # generator_architecture = [
-    #     TensorShape(length=None, features=latent_features),
-    #     LinearTransform(),
-    #     ActivationFunction("sin"),
-    #     TensorShape(length=None, features=64),
-    #     LinearTransform(),
-    #     ActivationFunction("sin"),
-    #     TensorShape(length=None, features=64),
-    #     LinearTransform(),
-    #     # ActivationFunction(activation_function_generator),
-    #     TensorShape(length=None, features=(512 * 8)),
-    #     Reshape(),
-    #     TensorShape(length=512, features=8),
-    #     FourierTransform(),
-    #     TensorShape(length=1024, features=4),
-    #     Convolution(kernel_size=127),
-    #     AddNoise(),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=4096, features=64),
-    #     Convolution(kernel_size=15),
-    #     AddNoise(),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=16384, features=16),
-    #     Convolution(kernel_size=15),
-    #     AddNoise(),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=65536, features=4),
-    #     Convolution(kernel_size=15),
-    #     AddNoise(),
-    #     TensorShape(length=65536, features=2),
-    # ]
-
-    # discriminator_architecture = [
-    #     TensorShape(length=65536, features=2),
-    #     Convolution(kernel_size=15),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=65536, features=4),
-    #     Convolution(kernel_size=15),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=16384, features=16),
-    #     Convolution(kernel_size=15),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=4096, features=64),
-    #     Convolution(kernel_size=127),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=1024, features=4),
-    #     FourierTransform(),
-    #     TensorShape(length=512, features=8),
-    #     Reshape(),
-    #     TensorShape(length=None, features=(512 * 8)),
-    #     LinearTransform(),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=None, features=(64)),
-    #     LinearTransform(),
-    #     ActivationFunction("leaky relu"),
-    #     TensorShape(length=None, features=(64)),
-    #     LinearTransform(),
-    #     TensorShape(length=None, features=1),
-    # ]
-
-    generator_architecture = [
-        TensorShape(length=None, features=latent_features),
-        LinearTransform(),
-        ActivationFunction("leaky relu"),
-        TensorShape(length=None, features=256),
-        LinearTransform(),
-        TensorShape(length=None, features=(1024 * 8)),
-        Reshape(),
-        TensorShape(length=1024, features=8),
-        FourierTransform(),
-        TensorShape(length=2048, features=4),
-        ResidualConvolutionStack(kernel_size=31),
-        TensorShape(length=2048, features=16),
-        Resample(mode="linear"),
-        TensorShape(length=4096, features=16),
-        ResidualConvolutionStack(kernel_size=31),
-        TensorShape(length=4096, features=16),
-        Resample(mode="linear"),
-        TensorShape(length=16384, features=16),
-        ResidualConvolutionStack(kernel_size=63),
-        TensorShape(length=16384, features=4),
-        Resample(mode="linear"),
-        TensorShape(length=65536, features=4),
-        ResidualConvolutionStack(kernel_size=127),
-        TensorShape(length=65536, features=2),
-    ]
- 
-    discriminator_architecture = [
-        TensorShape(length=65536, features=2),
-        Convolution(kernel_size=127),
-        ActivationFunction("leaky relu"),
-        TensorShape(length=16384, features=16),
-        Convolution(kernel_size=63),
-        ActivationFunction("leaky relu"),
-        TensorShape(length=4096, features=16),
-        Convolution(kernel_size=31),
-        ActivationFunction("leaky relu"),
-        TensorShape(length=2048, features=4),
-        FourierTransform(),
-        TensorShape(length=1024, features=8),
-        Reshape(),
-        TensorShape(length=None, features=(1024 * 8)),
-        LinearTransform(),
-        ActivationFunction("leaky relu"),
-        TensorShape(length=None, features=(256)),
-        LinearTransform(),
-        TensorShape(length=None, features=1),
-    ]
-
-    generator = NeuralNetwork("Generator", generator_architecture).cuda()
-    discriminator = NeuralNetwork("Discriminator", discriminator_architecture).cuda()
-
-    generator.print_description()
-    discriminator.print_description()
+    generator = Generator(num_latent_features=latent_features).cuda()
+    discriminator = Discriminator().cuda()
 
     lr = 1e-5
 
     generator_optimizer = torch.optim.Adam(
-    # generator_optimizer = torch.optim.RMSprop(
+        # generator_optimizer = torch.optim.RMSprop(
         generator.parameters(),
         lr=lr,
         # betas=(0.5, 0.999),
     )
 
     discriminator_optimizer = torch.optim.Adam(
-    # discriminator_optimizer = torch.optim.RMSprop(
+        # discriminator_optimizer = torch.optim.RMSprop(
         discriminator.parameters(),
         lr=lr,
         # betas=(0.5, 0.999)
