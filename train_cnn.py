@@ -16,6 +16,7 @@ from torch_utils import (
     Log,
     ResidualAdd1d,
     WithNoise1d,
+    WithNoise2d,
     enable_log_layers,
     save_module,
 )
@@ -99,7 +100,7 @@ class Generator(nn.Module):
             ),
             nn.BatchNorm2d(num_features=32),
             nn.LeakyReLU(),
-            WithNoise1d(num_features=32),
+            WithNoise2d(num_features=32),
             Log("generator spectral conv 1"),
             nn.ConvTranspose2d(
                 in_channels=32,

@@ -135,6 +135,23 @@ class WithNoise1d(nn.Module):
         weight = self.weights.reshape(1, F, 1)
         return x + weight * noise
 
+class WithNoise2d(nn.Module):
+    def __init__(self, num_features):
+        super(WithNoise2d, self).__init__()
+        assert isinstance(num_features, int)
+        self.num_features = num_features
+        self.weights = nn.parameter.Parameter(
+            0.01 * torch.ones((num_features,), dtype=torch.float)
+        )
+
+    def forward(self, x):
+        assert isinstance(x, torch.Tensor)
+        B, F, H, W = x.shape
+        assert_eq(F, self.num_features)
+        noise = -1.0 + 2.0 * torch.rand((B, F, H, W), dtype=x.dtype, device=x.device)
+        weight = self.weights.reshape(1, F, 1, 1)
+        return x + weight * noise
+
 
 class ConcatenateConstant(nn.Module):
     def __init__(self, constant):
