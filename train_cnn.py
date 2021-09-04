@@ -79,13 +79,17 @@ class Generator(nn.Module):
 
         self.num_latent_features = num_latent_features
 
+        self.spectral_features = 4
+
         self.fully_connected = nn.Sequential(
             Log("generator fully connected 0"),
             nn.Linear(in_features=num_latent_features, out_features=256),
             # nn.BatchNorm1d(num_features=256),
             nn.LeakyReLU(),
             Log("generator fully connected 1"),
-            nn.Linear(in_features=256, out_features=32 * 129 * 257),
+            nn.Linear(
+                in_features=256, out_features=(self.spectral_features * 129 * 257)
+            ),
             Log("generator fully connected 2"),
         )
 
@@ -124,7 +128,7 @@ class Generator(nn.Module):
             ResidualAdd1d(
                 nn.Sequential(
                     nn.Conv1d(
-                        in_channels=16,
+                        in_channels=self.spectral_features // 2,
                         out_channels=16,
                         kernel_size=31,
                         stride=1,
@@ -184,13 +188,16 @@ class Generator(nn.Module):
         # x3 = self.spectral_convs(x2)
         # assert_eq(x3.shape, (B, 32, 129, 257))
 
-        assert_eq(x1.shape, (B, 32 * 129 * 257))
-        x3 = x1.reshape(B, 32, 129, 257)
+        assert_eq(x1.shape, (B, self.spectral_features * 129 * 257))
+        x3 = x1.reshape(B, self.spectral_features, 129, 257)
 
-        x4 = torch.complex(real=x3[:, :16], imag=x3[:, 16:])
+        x4 = torch.complex(
+            real=x3[:, : (self.spectral_features // 2)],
+            imag=x3[:, (self.spectral_features // 2) :],
+        )
 
-        assert_eq(x4.shape, (B, 16, 129, 257))
-        x5 = x4.reshape(B * 16, 129, 257)
+        assert_eq(x4.shape, (B, self.spectral_features // 2, 129, 257))
+        x5 = x4.reshape(B * self.spectral_features // 2, 129, 257)
 
         x6 = torch.istft(
             input=x5,
@@ -200,9 +207,9 @@ class Generator(nn.Module):
             return_complex=False,
             onesided=True,
         )
-        assert_eq(x6.shape, (B * 16, 16384))
+        assert_eq(x6.shape, (B * self.spectral_features // 2, 16384))
 
-        x7 = x6.reshape(B, 16, 16384)
+        x7 = x6.reshape(B, self.spectral_features // 2, 16384)
         x8 = self.temporal_convs(x7)
         assert_eq(x8.shape, (B, 2, 65536))
 
@@ -212,6 +219,9 @@ class Generator(nn.Module):
 class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
+
+        self.spectral_features = 4
+
         self.temporal_convs = nn.Sequential(
             Log("discriminator temporal conv 0"),
             nn.Conv1d(
@@ -221,7 +231,11 @@ class Discriminator(nn.Module):
             nn.LeakyReLU(),
             Log("discriminator temporal conv 1"),
             nn.Conv1d(
-                in_channels=8, out_channels=16, kernel_size=31, stride=2, padding=15
+                in_channels=8,
+                out_channels=self.spectral_features // 2,
+                kernel_size=31,
+                stride=2,
+                padding=15,
             ),
             Log("discriminator temporal conv 2"),
         )
@@ -256,7 +270,9 @@ class Discriminator(nn.Module):
 
         self.fully_connected = nn.Sequential(
             Log("discriminator fully connected 1"),
-            nn.Linear(in_features=(32 * 129 * 257), out_features=256),
+            nn.Linear(
+                in_features=(self.spectral_features * 129 * 257), out_features=256
+            ),
             # nn.BatchNorm1d(num_features=256),
             nn.LeakyReLU(),
             Log("discriminator fully connected 2"),
@@ -271,8 +287,8 @@ class Discriminator(nn.Module):
 
         x0 = audio_clips
         x1 = self.temporal_convs(x0)
-        assert_eq(x1.shape, (B, 16, 16384))
-        x2 = x1.reshape(B * 16, 16384)
+        assert_eq(x1.shape, (B, self.spectral_features // 2, 16384))
+        x2 = x1.reshape(B * self.spectral_features // 2, 16384)
         x3 = torch.stft(
             input=x2,
             n_fft=self.window_size,
@@ -282,16 +298,16 @@ class Discriminator(nn.Module):
             return_complex=True,
             onesided=True,
         )
-        assert_eq(x3.shape, (B * 16, 129, 257))
-        x4 = x3.reshape(B, 16, 129, 257)
+        assert_eq(x3.shape, (B * self.spectral_features // 2, 129, 257))
+        x4 = x3.reshape(B, self.spectral_features // 2, 129, 257)
         x5 = torch.cat([torch.real(x4), torch.imag(x4)], dim=1)
-        assert_eq(x5.shape, (B, 32, 129, 257))
+        assert_eq(x5.shape, (B, self.spectral_features, 129, 257))
 
         # x6 = self.spectral_convs(x5)
         # assert_eq(x6.shape, (B, 32, 32, 64))
         # x7 = x6.reshape(B, 32 * 32 * 64)
 
-        x7 = x5.reshape(B, 32 * 129 * 257)
+        x7 = x5.reshape(B, self.spectral_features * 129 * 257)
 
         x8 = self.fully_connected(x7)
         assert_eq(x8.shape, (B, 1))
