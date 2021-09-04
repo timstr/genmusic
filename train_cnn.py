@@ -85,32 +85,32 @@ class Generator(nn.Module):
             # nn.BatchNorm1d(num_features=256),
             nn.LeakyReLU(),
             Log("generator fully connected 1"),
-            nn.Linear(in_features=256, out_features=32 * 32 * 64),
+            nn.Linear(in_features=256, out_features=32 * 129 * 257),
             Log("generator fully connected 2"),
         )
 
-        self.spectral_convs = nn.Sequential(
-            Log("generator spectral conv 0"),
-            nn.ConvTranspose2d(
-                in_channels=32,
-                out_channels=32,
-                kernel_size=15,
-                stride=2,
-                padding=(6, 6),
-            ),
-            nn.BatchNorm2d(num_features=32),
-            nn.LeakyReLU(),
-            WithNoise2d(num_features=32),
-            Log("generator spectral conv 1"),
-            nn.ConvTranspose2d(
-                in_channels=32,
-                out_channels=32,
-                kernel_size=15,
-                stride=2,
-                padding=(7, 7),
-            ),
-            Log("generator spectral conv 2"),
-        )
+        # self.spectral_convs = nn.Sequential(
+        #     Log("generator spectral conv 0"),
+        #     nn.ConvTranspose2d(
+        #         in_channels=32,
+        #         out_channels=32,
+        #         kernel_size=15,
+        #         stride=2,
+        #         padding=(6, 6),
+        #     ),
+        #     nn.BatchNorm2d(num_features=32),
+        #     nn.LeakyReLU(),
+        #     WithNoise2d(num_features=32),
+        #     Log("generator spectral conv 1"),
+        #     nn.ConvTranspose2d(
+        #         in_channels=32,
+        #         out_channels=32,
+        #         kernel_size=15,
+        #         stride=2,
+        #         padding=(7, 7),
+        #     ),
+        #     Log("generator spectral conv 2"),
+        # )
 
         self.window_size = 256
 
@@ -178,12 +178,14 @@ class Generator(nn.Module):
 
         x0 = latent_codes
         x1 = self.fully_connected(x0)
-        assert_eq(x1.shape, (B, 32 * 32 * 64))
 
-        x2 = x1.reshape(B, 32, 32, 64)
+        # assert_eq(x1.shape, (B, 32 * 32 * 64))
+        # x2 = x1.reshape(B, 32, 32, 64)
+        # x3 = self.spectral_convs(x2)
+        # assert_eq(x3.shape, (B, 32, 129, 257))
 
-        x3 = self.spectral_convs(x2)
-        assert_eq(x3.shape, (B, 32, 129, 257))
+        assert_eq(x1.shape, (B, 32 * 129 * 257))
+        x3 = x1.reshape(B, 32, 129, 257)
 
         x4 = torch.complex(real=x3[:, :16], imag=x3[:, 16:])
 
@@ -230,31 +232,31 @@ class Discriminator(nn.Module):
             data=torch.hann_window(self.window_size, periodic=True), requires_grad=False
         )
 
-        self.spectral_convs = nn.Sequential(
-            Log("discriminator spectral conv 0"),
-            nn.Conv2d(
-                in_channels=32,
-                out_channels=32,
-                kernel_size=15,
-                stride=2,
-                padding=(6, 6),
-            ),
-            nn.BatchNorm2d(num_features=32),
-            nn.LeakyReLU(),
-            Log("discriminator spectral conv 1"),
-            nn.Conv2d(
-                in_channels=32,
-                out_channels=32,
-                kernel_size=15,
-                stride=2,
-                padding=(7, 7),
-            ),
-            Log("discriminator spectral conv 2"),
-        )
+        # self.spectral_convs = nn.Sequential(
+        #     Log("discriminator spectral conv 0"),
+        #     nn.Conv2d(
+        #         in_channels=32,
+        #         out_channels=32,
+        #         kernel_size=15,
+        #         stride=2,
+        #         padding=(6, 6),
+        #     ),
+        #     nn.BatchNorm2d(num_features=32),
+        #     nn.LeakyReLU(),
+        #     Log("discriminator spectral conv 1"),
+        #     nn.Conv2d(
+        #         in_channels=32,
+        #         out_channels=32,
+        #         kernel_size=15,
+        #         stride=2,
+        #         padding=(7, 7),
+        #     ),
+        #     Log("discriminator spectral conv 2"),
+        # )
 
         self.fully_connected = nn.Sequential(
             Log("discriminator fully connected 1"),
-            nn.Linear(in_features=(32 * 32 * 64), out_features=256),
+            nn.Linear(in_features=(32 * 129 * 257), out_features=256),
             # nn.BatchNorm1d(num_features=256),
             nn.LeakyReLU(),
             Log("discriminator fully connected 2"),
@@ -284,9 +286,13 @@ class Discriminator(nn.Module):
         x4 = x3.reshape(B, 16, 129, 257)
         x5 = torch.cat([torch.real(x4), torch.imag(x4)], dim=1)
         assert_eq(x5.shape, (B, 32, 129, 257))
-        x6 = self.spectral_convs(x5)
-        assert_eq(x6.shape, (B, 32, 32, 64))
-        x7 = x6.reshape(B, 32 * 32 * 64)
+
+        # x6 = self.spectral_convs(x5)
+        # assert_eq(x6.shape, (B, 32, 32, 64))
+        # x7 = x6.reshape(B, 32 * 32 * 64)
+
+        x7 = x5.reshape(B, 32 * 129 * 257)
+
         x8 = self.fully_connected(x7)
         assert_eq(x8.shape, (B, 1))
 
