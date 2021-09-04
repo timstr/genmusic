@@ -322,10 +322,10 @@ def train(
     assert isinstance(latent_features, int)
     assert isinstance(patch_size, int)
 
-    parallel_batch_size = 8
+    parallel_batch_size = 4
     sequential_batch_size = 1
 
-    n_critic = 5
+    n_critic = 3
     n_generator = 1
     n_all = n_critic + n_generator
 
