@@ -1,7 +1,4 @@
 import os
-from torch._C import device
-
-from torch.nn.modules.conv import Conv2d
 
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 
@@ -12,26 +9,16 @@ import torchaudio
 import matplotlib.pyplot as plt
 import random
 
-from signal_processing import make_spectrogram, upsample_2x
+from signal_processing import make_spectrogram
 from audio_util import load_audio_clips, random_audio_batch, sane_audio_loss
 from torch_utils import (
-    Apply,
-    Downsample1d,
-    FourierTransformLayer,
-    InverseFourierTransformLayer,
+    Resample1d,
     Log,
-    ReshapeTensor,
-    ResidualAdd,
-    Upsample1d,
-    WithNoise1d,
+    ResidualAdd1d,
     enable_log_layers,
-    make_conv_down,
-    make_conv_same,
-    make_conv_up,
-    restore_module,
     save_module,
 )
-from util import assert_eq, flush, horizontal_rule, line, plt_screenshot
+from util import assert_eq, plt_screenshot
 from progress_bar import progress_bar
 
 
@@ -132,18 +119,52 @@ class Generator(nn.Module):
 
         self.temporal_convs = nn.Sequential(
             Log("generator temporal conv 0"),
-            nn.ConvTranspose1d(
-                in_channels=16,
-                out_channels=8,
-                kernel_size=32,
-                stride=2,
-                padding=15,
+            Resample1d(new_length=32768),
+            ResidualAdd1d(
+                nn.Sequential(
+                    nn.Conv1d(
+                        in_channels=16,
+                        out_channels=16,
+                        kernel_size=31,
+                        stride=1,
+                        padding=15,
+                        padding_mode="circular",
+                    ),
+                    nn.BatchNorm1d(num_features=16),
+                    nn.LeakyReLU(),
+                    nn.Conv1d(
+                        in_channels=16,
+                        out_channels=8,
+                        kernel_size=31,
+                        stride=1,
+                        padding=15,
+                        padding_mode="circular",
+                    ),
+                )
             ),
-            nn.BatchNorm1d(num_features=8),
-            nn.LeakyReLU(),
             Log("generator temporal conv 1"),
-            nn.ConvTranspose1d(
-                in_channels=8, out_channels=2, kernel_size=32, stride=2, padding=15
+            Resample1d(new_length=65536),
+            ResidualAdd1d(
+                nn.Sequential(
+                    nn.Conv1d(
+                        in_channels=8,
+                        out_channels=8,
+                        kernel_size=31,
+                        stride=1,
+                        padding=15,
+                        padding_mode="circular",
+                    ),
+                    nn.BatchNorm1d(num_features=8),
+                    nn.LeakyReLU(),
+                    nn.Conv1d(
+                        in_channels=8,
+                        out_channels=2,
+                        kernel_size=31,
+                        stride=1,
+                        padding=15,
+                        padding_mode="circular",
+                    ),
+                )
             ),
             Log("generator temporal conv 2"),
         )
@@ -266,7 +287,8 @@ class Discriminator(nn.Module):
         return x8
 
 
-# HACK
+# HACK to test networks
+# enable_log_layers()
 # d = Discriminator().cuda()
 # s = d(torch.rand((1, 2, 65536), device="cuda"))
 # g = Generator(num_latent_features=64).cuda()
@@ -418,7 +440,7 @@ def train(
 def main():
     # enable_log_layers()
 
-    songs = load_audio_clips("sound/*.flac")
+    songs = load_audio_clips("input_sound/*.flac")
 
     # features_lengths_kernel_sizes = [
     #     (512, 1, 65),

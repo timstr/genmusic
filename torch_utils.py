@@ -236,12 +236,12 @@ class Log(nn.Module):
         return x
 
 
-class Upsample1d(nn.Module):
-    def __init__(self, factor, mode="linear"):
-        super(Upsample1d, self).__init__()
-        assert isinstance(factor, int)
+class Resample1d(nn.Module):
+    def __init__(self, new_length, mode="linear"):
+        super(Resample1d, self).__init__()
+        assert isinstance(new_length, int)
         assert mode in ["linear", "nearest", "bicubic"]
-        self.factor = factor
+        self.new_length = new_length
         self.mode = mode
 
     def forward(self, x):
@@ -249,37 +249,16 @@ class Upsample1d(nn.Module):
         B, F, N = x.shape
         return nn.functional.interpolate(
             x,
-            size=(self.factor * N),
+            size=self.new_length,
             mode=self.mode,
             # Dammit, pytorch
             **({} if self.mode == "nearest" else {"align_corners": False}),
         )
 
 
-class Downsample1d(nn.Module):
-    def __init__(self, factor, mode="linear"):
-        super(Downsample1d, self).__init__()
-        assert isinstance(factor, int)
-        assert mode in ["linear", "nearest", "bicubic"]
-        self.factor = factor
-        self.mode = mode
-
-    def forward(self, x):
-        assert isinstance(x, torch.Tensor)
-        B, F, N = x.shape
-        assert (N % self.factor) == 0
-        return nn.functional.interpolate(
-            x,
-            size=(N // self.factor),
-            mode=self.mode,
-            # Dammit, pytorch
-            **({} if self.mode == "nearest" else {"align_corners": False}),
-        )
-
-
-class ResidualAdd(nn.Module):
+class ResidualAdd1d(nn.Module):
     def __init__(self, model):
-        super(ResidualAdd, self).__init__()
+        super(ResidualAdd1d, self).__init__()
         assert isinstance(model, nn.Module)
         self.model = model
 
@@ -288,8 +267,8 @@ class ResidualAdd(nn.Module):
         B1, F1, N1 = x.shape
         y = self.model(x)
         B2, F2, N2 = y.shape
-        assert B1 == B2
-        assert N1 == N2
+        assert_eq(B1, B2)
+        assert_eq(N1, N2)
         if F1 > F2:
             return x[:, :F2] + y
         else:
