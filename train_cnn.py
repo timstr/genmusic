@@ -8,9 +8,9 @@ from typing import List, Tuple
 import sys
 import torch
 import torch.nn as nn
+import torchaudio
 import matplotlib.pyplot as plt
 import random
-import scipy.io.wavfile as wf
 
 from signal_processing import make_spectrogram, upsample_2x
 from audio_util import load_audio_clips, random_audio_batch, sane_audio_loss
@@ -193,8 +193,8 @@ class ResidualConvolutionStack(Operation):
                 padding_mode="circular",
             ),
             nn.BatchNorm1d(num_features=f_out),
-            nn.ReLU(),
-            # nn.LeakyReLU(),
+            # nn.ReLU(),
+            nn.LeakyReLU(),
             # Apply(torch.sin),
             make_conv_same(
                 in_channels=f_out,
@@ -580,10 +580,10 @@ def train(
     assert isinstance(latent_features, int)
     assert isinstance(patch_size, int)
 
-    parallel_batch_size = 2  # 64
+    parallel_batch_size = 8
     sequential_batch_size = 1
 
-    n_critic = 3
+    n_critic = 5
     n_generator = 1
     n_all = n_critic + n_generator
 
@@ -592,8 +592,8 @@ def train(
     discriminator_loss_real_acc = 0.0
     discriminator_loss_fake_acc = 0.0
 
-    sys.stdout.write("  ")
-    sys.stdout.flush()
+    # sys.stdout.write("  ")
+    # sys.stdout.flush()
 
     for i_batch in range(sequential_batch_size * n_all):
         mode = (i_batch // sequential_batch_size) % n_all
@@ -661,15 +661,15 @@ def train(
                 for p in discriminator.parameters():
                     p.clamp_(min=-parameter_limit, max=parameter_limit)
 
-        console_animation_characters = "-\\|/"
-        sys.stdout.write("\b")
-        if i_batch + 1 < (sequential_batch_size * n_all):
-            sys.stdout.write(
-                console_animation_characters[
-                    i_batch % len(console_animation_characters)
-                ]
-            )
-        sys.stdout.flush()
+        # console_animation_characters = "-\\|/"
+        # sys.stdout.write("\b")
+        # if i_batch + 1 < (sequential_batch_size * n_all):
+        #     sys.stdout.write(
+        #         console_animation_characters[
+        #             i_batch % len(console_animation_characters)
+        #         ]
+        #     )
+        # sys.stdout.flush()
 
     generator_loss_fool_avg = generator_loss_fool_acc / (
         sequential_batch_size * n_generator
@@ -684,8 +684,8 @@ def train(
         sequential_batch_size * n_critic
     )
 
-    sys.stdout.write("\b\b")
-    sys.stdout.flush()
+    # sys.stdout.write("\b\b")
+    # sys.stdout.flush()
 
     return (
         generator_loss_fool_avg,
@@ -789,31 +789,31 @@ def main():
         TensorShape(length=1024, features=8),
         FourierTransform(),
         TensorShape(length=2048, features=4),
-        ResidualConvolutionStack(kernel_size=15),
+        ResidualConvolutionStack(kernel_size=31),
         TensorShape(length=2048, features=16),
         Resample(mode="linear"),
         TensorShape(length=4096, features=16),
-        ResidualConvolutionStack(kernel_size=15),
+        ResidualConvolutionStack(kernel_size=31),
         TensorShape(length=4096, features=16),
         Resample(mode="linear"),
         TensorShape(length=16384, features=16),
-        ResidualConvolutionStack(kernel_size=15),
+        ResidualConvolutionStack(kernel_size=63),
         TensorShape(length=16384, features=4),
         Resample(mode="linear"),
         TensorShape(length=65536, features=4),
-        ResidualConvolutionStack(kernel_size=15),
+        ResidualConvolutionStack(kernel_size=127),
         TensorShape(length=65536, features=2),
     ]
-
+ 
     discriminator_architecture = [
         TensorShape(length=65536, features=2),
-        Convolution(kernel_size=15),
+        Convolution(kernel_size=127),
         ActivationFunction("leaky relu"),
         TensorShape(length=16384, features=16),
-        Convolution(kernel_size=15),
+        Convolution(kernel_size=63),
         ActivationFunction("leaky relu"),
         TensorShape(length=4096, features=16),
-        Convolution(kernel_size=15),
+        Convolution(kernel_size=31),
         ActivationFunction("leaky relu"),
         TensorShape(length=2048, features=4),
         FourierTransform(),
@@ -833,32 +833,32 @@ def main():
     generator.print_description()
     discriminator.print_description()
 
-    lr = 0.00001
+    lr = 1e-5
 
-    # generator_optimizer = torch.optim.Adam(
-    generator_optimizer = torch.optim.RMSprop(
+    generator_optimizer = torch.optim.Adam(
+    # generator_optimizer = torch.optim.RMSprop(
         generator.parameters(),
         lr=lr,
         # betas=(0.5, 0.999),
     )
 
-    # discriminator_optimizer = torch.optim.Adam(
-    discriminator_optimizer = torch.optim.RMSprop(
+    discriminator_optimizer = torch.optim.Adam(
+    # discriminator_optimizer = torch.optim.RMSprop(
         discriminator.parameters(),
         lr=lr,
         # betas=(0.5, 0.999)
     )
 
-    # restore_module(generator, "models/generator_20129.dat")
-    # restore_module(discriminator, "models/discriminator_20129.dat")
-    # restore_module(generator_optimizer, "models/generator_optimizer_20129.dat")
-    # restore_module(discriminator_optimizer, "models/discriminator_optimizer_20129.dat")
+    # restore_module(generator, "models/generator_9618.dat")
+    # restore_module(discriminator, "models/discriminator_9618.dat")
+    # restore_module(generator_optimizer, "models/generator_optimizer_9618.dat")
+    # restore_module(discriminator_optimizer, "models/discriminator_optimizer_9618.dat")
     generator.train()
     discriminator.train()
 
     plt.ion()
 
-    fig, axes = plt.subplots(2, 3, figsize=(8, 8), dpi=80)
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8), dpi=80)
     fig.tight_layout(rect=(0.0, 0.05, 1.0, 0.95))
 
     ax_tl = axes[0, 0]
@@ -935,7 +935,7 @@ def main():
             progress_bar(
                 current_iteration % plot_interval,
                 plot_interval,
-                f"total iterations: {current_iteration + 1}",
+                f"total: {current_iteration + 1}",
             )
 
             time_to_plot = (
@@ -944,6 +944,7 @@ def main():
 
             if time_to_plot:
                 with torch.no_grad():
+                    generator.eval()
                     output_clips = []
                     for _ in range(sounds_per_plot):
                         generated_clip = generator(
@@ -953,6 +954,7 @@ def main():
                         )
                         generated_clip = generated_clip.squeeze().detach().cpu()
                         output_clips.append(generated_clip)
+                    generator.train()
 
                 audio_clip, song_name = random.choice(songs)
 
@@ -994,13 +996,13 @@ def main():
                 ax_bm.title.set_text(f"Fake Audio Spectrograms (3x RGB Overlay)")
                 ax_bm.imshow(rgb_spectrogram)
 
-                ax_tr.title.set_text("Generator Loss")
+                ax_tr.title.set_text("Generator Score")
                 generator_loss_fool_plotter.plot_to(ax_tr)
                 generator_loss_sane_plotter.plot_to(ax_tr)
                 # ax_tr.set_xlim(-1, current_iteration + 1)
                 # ax_tr.set_yscale("log")
 
-                ax_br.title.set_text("Discriminator Loss")
+                ax_br.title.set_text("Discriminator Scores")
                 discriminator_loss_fake_plotter.plot_to(ax_br)
                 discriminator_loss_real_plotter.plot_to(ax_br)
                 discriminator_loss_combined_plotter.plot_to(ax_br)
@@ -1019,10 +1021,10 @@ def main():
                     clip_to_play -= mean_amp
                     max_amp = torch.max(torch.abs(clip_to_play), dim=1, keepdim=True)[0]
                     clip_to_play = 0.5 * clip_to_play / max_amp
-                    wf.write(
-                        f"output_sound/output_{current_iteration + 1}_v{i_clip + 1}.wav",
-                        32000,
-                        clip_to_play.repeat(1, 2).permute(1, 0).cpu().numpy(),
+                    torchaudio.save(
+                        filepath=f"output_sound/output_{current_iteration + 1}_v{i_clip + 1}.flac",
+                        src=clip_to_play.repeat(1, 2),
+                        sample_rate=32000,
                     )
             if ((current_iteration + 1) % 65536) == 0:
                 save_things(current_iteration)
