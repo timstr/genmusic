@@ -79,101 +79,94 @@ class Generator(nn.Module):
 
         self.num_latent_features = num_latent_features
 
-        self.spectral_features = 4
+        self.fc_hidden_features = 256
+        self.fc_output_length = 1024
+        self.fc_output_features = 8
+        self.conv_features = 16
 
         self.fully_connected = nn.Sequential(
             Log("generator fully connected 0"),
-            nn.Linear(in_features=num_latent_features, out_features=256),
-            # nn.BatchNorm1d(num_features=256),
+            nn.Linear(
+                in_features=num_latent_features, out_features=self.fc_hidden_features
+            ),
             nn.LeakyReLU(),
             Log("generator fully connected 1"),
             nn.Linear(
-                in_features=256, out_features=(self.spectral_features * 129 * 257)
+                in_features=self.fc_hidden_features,
+                out_features=(self.fc_output_features * self.fc_output_length),
             ),
             Log("generator fully connected 2"),
         )
 
-        # self.spectral_convs = nn.Sequential(
-        #     Log("generator spectral conv 0"),
-        #     nn.ConvTranspose2d(
-        #         in_channels=32,
-        #         out_channels=32,
-        #         kernel_size=15,
-        #         stride=2,
-        #         padding=(6, 6),
-        #     ),
-        #     nn.BatchNorm2d(num_features=32),
-        #     nn.LeakyReLU(),
-        #     WithNoise2d(num_features=32),
-        #     Log("generator spectral conv 1"),
-        #     nn.ConvTranspose2d(
-        #         in_channels=32,
-        #         out_channels=32,
-        #         kernel_size=15,
-        #         stride=2,
-        #         padding=(7, 7),
-        #     ),
-        #     Log("generator spectral conv 2"),
-        # )
-
-        self.window_size = 256
-
-        self.window = nn.parameter.Parameter(
-            data=torch.hann_window(self.window_size, periodic=True), requires_grad=False
-        )
+        def residual_block(in_features, hidden_features, out_features):
+            return ResidualAdd1d(
+                nn.Sequential(
+                    nn.Conv1d(
+                        in_channels=in_features,
+                        out_channels=hidden_features,
+                        kernel_size=31,
+                        stride=1,
+                        padding=15,
+                        padding_mode="circular",
+                    ),
+                    nn.BatchNorm1d(num_features=hidden_features),
+                    nn.LeakyReLU(),
+                    WithNoise1d(num_features=hidden_features),
+                    nn.Conv1d(
+                        in_channels=hidden_features,
+                        out_channels=out_features,
+                        kernel_size=31,
+                        stride=1,
+                        padding=15,
+                        padding_mode="circular",
+                    ),
+                )
+            )
 
         self.temporal_convs = nn.Sequential(
             Log("generator temporal conv 0"),
-            Resample1d(new_length=32768),
-            ResidualAdd1d(
-                nn.Sequential(
-                    nn.Conv1d(
-                        in_channels=self.spectral_features // 2,
-                        out_channels=16,
-                        kernel_size=31,
-                        stride=1,
-                        padding=15,
-                        padding_mode="circular",
-                    ),
-                    nn.BatchNorm1d(num_features=16),
-                    nn.LeakyReLU(),
-                    WithNoise1d(num_features=16),
-                    nn.Conv1d(
-                        in_channels=16,
-                        out_channels=8,
-                        kernel_size=31,
-                        stride=1,
-                        padding=15,
-                        padding_mode="circular",
-                    ),
-                )
+            Resample1d(new_length=self.fc_output_length),
+            residual_block(
+                in_features=self.fc_output_features,
+                hidden_features=self.conv_features,
+                out_features=self.conv_features,
             ),
             Log("generator temporal conv 1"),
-            Resample1d(new_length=65536),
-            ResidualAdd1d(
-                nn.Sequential(
-                    nn.Conv1d(
-                        in_channels=8,
-                        out_channels=8,
-                        kernel_size=31,
-                        stride=1,
-                        padding=15,
-                        padding_mode="circular",
-                    ),
-                    nn.BatchNorm1d(num_features=8),
-                    nn.LeakyReLU(),
-                    WithNoise1d(num_features=8),
-                    nn.Conv1d(
-                        in_channels=8,
-                        out_channels=2,
-                        kernel_size=31,
-                        stride=1,
-                        padding=15,
-                        padding_mode="circular",
-                    ),
-                )
+            Resample1d(new_length=4096),
+            residual_block(
+                in_features=self.conv_features,
+                hidden_features=self.conv_features,
+                out_features=self.conv_features,
             ),
             Log("generator temporal conv 2"),
+            Resample1d(new_length=8192),
+            residual_block(
+                in_features=self.conv_features,
+                hidden_features=self.conv_features,
+                out_features=self.conv_features,
+            ),
+            Log("generator temporal conv 3"),
+            Resample1d(new_length=16384),
+            residual_block(
+                in_features=self.conv_features,
+                hidden_features=self.conv_features,
+                out_features=self.conv_features,
+            ),
+            Log("generator temporal conv 4"),
+            Resample1d(new_length=32768),
+            residual_block(
+                in_features=self.conv_features,
+                hidden_features=self.conv_features,
+                out_features=self.conv_features,
+            ),
+            Log("generator temporal conv 5"),
+            Resample1d(new_length=65536),
+            residual_block(
+                in_features=self.conv_features,
+                hidden_features=self.conv_features,
+                out_features=2,
+            ),
+            Log("generator temporal conv 6"),
         )
 
     def forward(self, latent_codes):
@@ -183,100 +176,81 @@ class Generator(nn.Module):
         x0 = latent_codes
         x1 = self.fully_connected(x0)
 
-        # assert_eq(x1.shape, (B, 32 * 32 * 64))
-        # x2 = x1.reshape(B, 32, 32, 64)
-        # x3 = self.spectral_convs(x2)
-        # assert_eq(x3.shape, (B, 32, 129, 257))
+        assert_eq(x1.shape, (B, self.fc_output_features * self.fc_output_length))
+        x2 = x1.reshape(B, self.fc_output_features, self.fc_output_length)
 
-        assert_eq(x1.shape, (B, self.spectral_features * 129 * 257))
-        x3 = x1.reshape(B, self.spectral_features, 129, 257)
+        x3 = self.temporal_convs(x2)
 
-        x4 = torch.complex(
-            real=x3[:, : (self.spectral_features // 2)],
-            imag=x3[:, (self.spectral_features // 2) :],
-        )
+        assert_eq(x3.shape, (B, 2, 65536))
 
-        assert_eq(x4.shape, (B, self.spectral_features // 2, 129, 257))
-        x5 = x4.reshape(B * self.spectral_features // 2, 129, 257)
-
-        x6 = torch.istft(
-            input=x5,
-            n_fft=self.window_size,
-            window=self.window,
-            center=True,
-            return_complex=False,
-            onesided=True,
-        )
-        assert_eq(x6.shape, (B * self.spectral_features // 2, 16384))
-
-        x7 = x6.reshape(B, self.spectral_features // 2, 16384)
-        x8 = self.temporal_convs(x7)
-        assert_eq(x8.shape, (B, 2, 65536))
-
-        return x8
+        return x3
 
 
 class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
 
-        self.spectral_features = 4
+        self.conv_features = 16
+        self.fc_input_length = 1024
+        self.fc_input_features = 8
+        self.fc_hidden_features = 256
 
-        self.temporal_convs = nn.Sequential(
-            Log("discriminator temporal conv 0"),
-            nn.Conv1d(
-                in_channels=2, out_channels=8, kernel_size=31, stride=2, padding=15
-            ),
-            nn.BatchNorm1d(num_features=8),
-            nn.LeakyReLU(),
-            Log("discriminator temporal conv 1"),
-            nn.Conv1d(
-                in_channels=8,
-                out_channels=self.spectral_features // 2,
+        def conv_down_2x(in_features, out_features):
+            return nn.Conv1d(
+                in_channels=in_features,
+                out_channels=out_features,
                 kernel_size=31,
                 stride=2,
                 padding=15,
+            )
+
+        self.temporal_convs = nn.Sequential(
+            Log("discriminator temporal conv 0"),
+            conv_down_2x(in_features=2, out_features=self.conv_features),
+            nn.BatchNorm1d(num_features=self.conv_features),
+            nn.LeakyReLU(),
+            Log("discriminator temporal conv 1"),
+            conv_down_2x(
+                in_features=self.conv_features, out_features=self.conv_features
             ),
+            nn.BatchNorm1d(num_features=self.conv_features),
+            nn.LeakyReLU(),
             Log("discriminator temporal conv 2"),
+            conv_down_2x(
+                in_features=self.conv_features, out_features=self.conv_features
+            ),
+            nn.BatchNorm1d(num_features=self.conv_features),
+            nn.LeakyReLU(),
+            Log("discriminator temporal conv 3"),
+            conv_down_2x(
+                in_features=self.conv_features, out_features=self.conv_features
+            ),
+            nn.BatchNorm1d(num_features=self.conv_features),
+            nn.LeakyReLU(),
+            Log("discriminator temporal conv 4"),
+            conv_down_2x(
+                in_features=self.conv_features, out_features=self.conv_features
+            ),
+            nn.BatchNorm1d(num_features=self.conv_features),
+            nn.LeakyReLU(),
+            Log("discriminator temporal conv 5"),
+            conv_down_2x(
+                in_features=self.conv_features, out_features=self.fc_input_features
+            ),
+            nn.BatchNorm1d(num_features=self.fc_input_features),
+            nn.LeakyReLU(),
+            Log("discriminator temporal conv 6"),
         )
-
-        self.window_size = 256
-
-        self.window = nn.parameter.Parameter(
-            data=torch.hann_window(self.window_size, periodic=True), requires_grad=False
-        )
-
-        # self.spectral_convs = nn.Sequential(
-        #     Log("discriminator spectral conv 0"),
-        #     nn.Conv2d(
-        #         in_channels=32,
-        #         out_channels=32,
-        #         kernel_size=15,
-        #         stride=2,
-        #         padding=(6, 6),
-        #     ),
-        #     nn.BatchNorm2d(num_features=32),
-        #     nn.LeakyReLU(),
-        #     Log("discriminator spectral conv 1"),
-        #     nn.Conv2d(
-        #         in_channels=32,
-        #         out_channels=32,
-        #         kernel_size=15,
-        #         stride=2,
-        #         padding=(7, 7),
-        #     ),
-        #     Log("discriminator spectral conv 2"),
-        # )
 
         self.fully_connected = nn.Sequential(
             Log("discriminator fully connected 1"),
             nn.Linear(
-                in_features=(self.spectral_features * 129 * 257), out_features=256
+                in_features=(self.fc_input_features * self.fc_input_length),
+                out_features=self.fc_hidden_features,
             ),
-            # nn.BatchNorm1d(num_features=256),
             nn.LeakyReLU(),
             Log("discriminator fully connected 2"),
-            nn.Linear(in_features=256, out_features=1),
+            nn.Linear(in_features=self.fc_hidden_features, out_features=1),
             Log("discriminator fully connected 3"),
         )
 
@@ -287,32 +261,12 @@ class Discriminator(nn.Module):
 
         x0 = audio_clips
         x1 = self.temporal_convs(x0)
-        assert_eq(x1.shape, (B, self.spectral_features // 2, 16384))
-        x2 = x1.reshape(B * self.spectral_features // 2, 16384)
-        x3 = torch.stft(
-            input=x2,
-            n_fft=self.window_size,
-            window=self.window,
-            center=True,
-            pad_mode="circular",
-            return_complex=True,
-            onesided=True,
-        )
-        assert_eq(x3.shape, (B * self.spectral_features // 2, 129, 257))
-        x4 = x3.reshape(B, self.spectral_features // 2, 129, 257)
-        x5 = torch.cat([torch.real(x4), torch.imag(x4)], dim=1)
-        assert_eq(x5.shape, (B, self.spectral_features, 129, 257))
+        assert_eq(x1.shape, (B, self.fc_input_features, self.fc_input_length))
+        x2 = x1.reshape(B, self.fc_input_features * self.fc_input_length)
+        x3 = self.fully_connected(x2)
+        assert_eq(x3.shape, (B, 1))
 
-        # x6 = self.spectral_convs(x5)
-        # assert_eq(x6.shape, (B, 32, 32, 64))
-        # x7 = x6.reshape(B, 32 * 32 * 64)
-
-        x7 = x5.reshape(B, self.spectral_features * 129 * 257)
-
-        x8 = self.fully_connected(x7)
-        assert_eq(x8.shape, (B, 1))
-
-        return x8
+        return x3
 
 
 # HACK to test networks
@@ -353,7 +307,7 @@ def train(
     parallel_batch_size = 4
     sequential_batch_size = 1
 
-    n_critic = 3
+    n_critic = 5
     n_generator = 1
     n_all = n_critic + n_generator
 
