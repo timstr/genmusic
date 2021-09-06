@@ -83,7 +83,7 @@ class Generator(nn.Module):
         self.num_latent_features = num_latent_features
 
         self.temporal_features = 16
-        self.frequency_features = 8
+        self.frequency_features = 4
         self.fc_output_length = 9
         self.fc_output_features = 32
         self.fc_hidden_features = 128
@@ -144,23 +144,23 @@ class Generator(nn.Module):
         )
 
         self.spectral_convs = nn.Sequential(
-            CheckShape((self.fc_output_features, 33)),
+            CheckShape((self.fc_output_features, 9)),
             Log("generator spectral conv 0"),
-            Resample1d(new_length=65),
+            Resample1d(new_length=17),
             residual_block(
                 in_features=self.fc_output_features,
                 hidden_features=self.spectral_features,
                 out_features=self.spectral_features,
             ),
             Log("generator spectral conv 1"),
-            Resample1d(new_length=129),
+            Resample1d(new_length=33),
             residual_block(
                 in_features=self.spectral_features,
                 hidden_features=self.spectral_features,
                 out_features=self.spectral_features,
             ),
             Log("generator spectral conv 2"),
-            Resample1d(new_length=257),
+            Resample1d(new_length=65),
             residual_block(
                 in_features=self.spectral_features,
                 hidden_features=self.spectral_features,
@@ -231,7 +231,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         self.temporal_features = 16
-        self.frequency_features = 8
+        self.frequency_features = 4
         self.fc_input_length = 9
         self.fc_input_features = 32
         self.fc_hidden_features = 128
@@ -347,12 +347,12 @@ class Discriminator(nn.Module):
 
 
 # HACK to test networks
-enable_log_layers()
-d = Discriminator().cuda()
-s = d(torch.rand((1, 2, 65536), device="cuda"))
-g = Generator(num_latent_features=64).cuda()
-a = g(torch.rand((1, 64), device="cuda"))
-exit(-1)
+# enable_log_layers()
+# d = Discriminator().cuda()
+# s = d(torch.rand((1, 2, 65536), device="cuda"))
+# g = Generator(num_latent_features=64).cuda()
+# a = g(torch.rand((1, 64), device="cuda"))
+# exit(-1)
 
 
 def random_initial_vector(batch_size, num_features):
