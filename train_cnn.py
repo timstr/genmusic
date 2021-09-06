@@ -96,15 +96,16 @@ class Generator(nn.Module):
         self.frequencies = (self.window_size // 2) + 1
         self.spectral_features = self.frequencies * self.frequency_features
 
-        def residual_block(in_features, hidden_features, out_features):
+        def residual_block(in_features, hidden_features, out_features, kernel_size):
+            assert (kernel_size % 2) == 1
             return ResidualAdd1d(
                 nn.Sequential(
                     nn.Conv1d(
                         in_channels=in_features,
                         out_channels=hidden_features,
-                        kernel_size=31,
+                        kernel_size=kernel_size,
                         stride=1,
-                        padding=15,
+                        padding=(kernel_size - 1) // 2,
                         padding_mode="circular",
                     ),
                     nn.BatchNorm1d(num_features=hidden_features),
@@ -113,9 +114,9 @@ class Generator(nn.Module):
                     nn.Conv1d(
                         in_channels=hidden_features,
                         out_channels=out_features,
-                        kernel_size=31,
+                        kernel_size=kernel_size,
                         stride=1,
-                        padding=15,
+                        padding=(kernel_size - 1) // 2,
                         padding_mode="circular",
                     ),
                 )
@@ -128,65 +129,74 @@ class Generator(nn.Module):
                 in_features=self.num_latent_features,
                 out_features=self.fc_hidden_features,
             ),
+            # nn.BatchNorm1d(num_features=self.fc_hidden_features),
             nn.LeakyReLU(0.2),
             Log("generator fully connected 1"),
             nn.Linear(
                 in_features=self.fc_hidden_features,
-                out_features=self.fc_hidden_features,
-            ),
-            nn.LeakyReLU(0.2),
-            Log("generator fully connected 2"),
-            nn.Linear(
-                in_features=self.fc_hidden_features,
                 out_features=(self.fc_output_features * self.fc_output_length),
             ),
-            Log("generator fully connected 3"),
+            Log("generator fully connected 2"),
         )
+        # print("Generator fully-connected:")
+        # print(self.fully_connected)
+        # print("")
 
         self.spectral_convs = nn.Sequential(
-            CheckShape((self.fc_output_features, 9)),
+            CheckShape((self.fc_output_features, 33)),
             Log("generator spectral conv 0"),
-            Resample1d(new_length=17),
+            Resample1d(new_length=65),
             residual_block(
                 in_features=self.fc_output_features,
                 hidden_features=self.spectral_features,
                 out_features=self.spectral_features,
+                kernel_size=5,
             ),
             Log("generator spectral conv 1"),
-            Resample1d(new_length=33),
+            Resample1d(new_length=129),
             residual_block(
                 in_features=self.spectral_features,
                 hidden_features=self.spectral_features,
                 out_features=self.spectral_features,
+                kernel_size=5,
             ),
             Log("generator spectral conv 2"),
-            Resample1d(new_length=65),
-            residual_block(
-                in_features=self.spectral_features,
-                hidden_features=self.spectral_features,
-                out_features=self.spectral_features,
-            ),
-            Log("generator spectral conv 3"),
         )
+        # print("Generator spectral convolutions:")
+        # print(self.spectral_convs)
+        # print("")
 
         self.temporal_convs = nn.Sequential(
-            CheckShape((self.frequency_features // 2, 16384)),
+            CheckShape((self.frequency_features // 2, 8192)),
             Log("generator temporal conv 0"),
-            Resample1d(new_length=32768),
+            Resample1d(new_length=16384),
             residual_block(
                 in_features=self.frequency_features // 2,
                 hidden_features=self.temporal_features,
                 out_features=self.temporal_features,
+                kernel_size=31,
             ),
             Log("generator temporal conv 1"),
+            Resample1d(new_length=32768),
+            residual_block(
+                in_features=self.temporal_features,
+                hidden_features=self.temporal_features,
+                out_features=self.temporal_features,
+                kernel_size=31,
+            ),
+            Log("generator temporal conv 2"),
             Resample1d(new_length=65536),
             residual_block(
                 in_features=self.temporal_features,
                 hidden_features=self.temporal_features,
                 out_features=2,
+                kernel_size=31,
             ),
-            Log("generator temporal conv 2"),
+            Log("generator temporal conv 3"),
         )
+        # print("Generator temporal convolutions")
+        # print(self.temporal_convs)
+        # print("")
 
     def forward(self, latent_codes):
         B, D = latent_codes.shape
@@ -198,15 +208,15 @@ class Generator(nn.Module):
         assert_eq(x1.shape, (B, self.fc_output_features * self.fc_output_length))
         x2 = x1.reshape(B, self.fc_output_features, self.fc_output_length)
         x3 = self.spectral_convs(x2)
-        assert_eq(x3.shape, (B, self.frequency_features * self.frequencies, 257))
+        assert_eq(x3.shape, (B, self.frequency_features * self.frequencies, 129))
 
         x4 = torch.complex(
             real=x3[:, : (self.frequency_features * self.frequencies // 2)],
             imag=x3[:, (self.frequency_features * self.frequencies // 2) :],
         )
 
-        assert_eq(x4.shape, (B, self.frequency_features * self.frequencies // 2, 257))
-        x5 = x4.reshape(B * self.frequency_features // 2, self.frequencies, 257)
+        assert_eq(x4.shape, (B, self.frequency_features * self.frequencies // 2, 129))
+        x5 = x4.reshape(B * self.frequency_features // 2, self.frequencies, 129)
 
         x6 = torch.istft(
             input=x5,
@@ -217,9 +227,9 @@ class Generator(nn.Module):
             return_complex=False,
             onesided=True,
         )
-        assert_eq(x6.shape, (B * self.frequency_features // 2, 16384))
+        assert_eq(x6.shape, (B * self.frequency_features // 2, 8192))
 
-        x7 = x6.reshape(B, self.frequency_features // 2, 16384)
+        x7 = x6.reshape(B, self.frequency_features // 2, 8192)
         x8 = self.temporal_convs(x7)
         assert_eq(x8.shape, (B, 2, 65536))
 
@@ -244,52 +254,66 @@ class Discriminator(nn.Module):
         self.frequencies = (self.window_size // 2) + 1
         self.spectral_features = self.frequencies * self.frequency_features
 
-        def conv_down_2x(in_features, out_features):
+        def conv_down_2x(in_features, out_features, kernel_size):
+            assert (kernel_size % 2) == 1
             return nn.Conv1d(
                 in_channels=in_features,
                 out_channels=out_features,
-                kernel_size=31,
+                kernel_size=kernel_size,
                 stride=2,
-                padding=15,
+                padding=(kernel_size - 1) // 2,
             )
 
         self.temporal_convs = nn.Sequential(
             Log("discriminator temporal conv 0"),
-            conv_down_2x(in_features=2, out_features=self.temporal_features),
+            conv_down_2x(
+                in_features=2, out_features=self.temporal_features, kernel_size=31
+            ),
             nn.BatchNorm1d(num_features=self.temporal_features),
             nn.LeakyReLU(0.2),
             Log("discriminator temporal conv 1"),
             conv_down_2x(
                 in_features=self.temporal_features,
+                out_features=self.temporal_features,
+                kernel_size=31,
+            ),
+            nn.BatchNorm1d(num_features=self.temporal_features),
+            nn.LeakyReLU(0.2),
+            Log("discriminator temporal conv 2"),
+            conv_down_2x(
+                in_features=self.temporal_features,
                 out_features=self.frequency_features // 2,
+                kernel_size=31,
             ),
             nn.BatchNorm1d(num_features=self.frequency_features // 2),
-            Log("discriminator temporal conv 2"),
+            Log("discriminator temporal conv 3"),
         )
+        # print("Discriminator temporal convolutions:")
+        # print(self.temporal_convs)
+        # print("")
 
         self.spectral_convs = nn.Sequential(
             Log("discriminator spectral conv 0"),
             conv_down_2x(
-                in_features=self.spectral_features, out_features=self.spectral_features
+                in_features=self.spectral_features,
+                out_features=self.spectral_features,
+                kernel_size=5,
             ),
             nn.BatchNorm1d(num_features=self.spectral_features),
             nn.LeakyReLU(0.2),
             Log("discriminator spectral conv 1"),
             conv_down_2x(
                 in_features=self.spectral_features,
-                out_features=self.spectral_features,
-            ),
-            nn.BatchNorm1d(num_features=self.spectral_features),
-            nn.LeakyReLU(0.2),
-            Log("discriminator spectral conv 2"),
-            conv_down_2x(
-                in_features=self.spectral_features,
-                out_features=(self.fc_input_features),
+                out_features=self.fc_input_features,
+                kernel_size=5,
             ),
             nn.BatchNorm1d(num_features=self.fc_input_features),
             nn.LeakyReLU(0.2),
-            Log("discriminator spectral conv 3"),
+            Log("discriminator spectral conv 2"),
         )
+        # print("Discriminator spectral convolutions:")
+        # print(self.spectral_convs)
+        # print("")
 
         self.fully_connected = nn.Sequential(
             Log("discriminator fully connected 0"),
@@ -298,17 +322,15 @@ class Discriminator(nn.Module):
                 in_features=(self.fc_input_features * self.fc_input_length),
                 out_features=self.fc_hidden_features,
             ),
+            # nn.BatchNorm1d(num_features=self.fc_hidden_features),
             nn.LeakyReLU(0.2),
             Log("discriminator fully connected 1"),
-            nn.Linear(
-                in_features=self.fc_hidden_features,
-                out_features=self.fc_hidden_features,
-            ),
-            nn.LeakyReLU(0.2),
-            Log("discriminator fully connected 2"),
             nn.Linear(in_features=self.fc_hidden_features, out_features=1),
-            Log("discriminator fully connected 3"),
+            Log("discriminator fully connected 2"),
         )
+        # print("Discriminator fully-connected:")
+        # print(self.fully_connected)
+        # print("")
 
     def forward(self, audio_clips):
         B, C, N = audio_clips.shape
@@ -317,8 +339,8 @@ class Discriminator(nn.Module):
 
         x0 = audio_clips
         x1 = self.temporal_convs(x0)
-        assert_eq(x1.shape, (B, self.frequency_features // 2, 16384))
-        x2 = x1.reshape(B * self.frequency_features // 2, 16384)
+        assert_eq(x1.shape, (B, self.frequency_features // 2, 8192))
+        x2 = x1.reshape(B * self.frequency_features // 2, 8192)
         x3 = torch.stft(
             input=x2,
             n_fft=self.window_size,
@@ -329,12 +351,12 @@ class Discriminator(nn.Module):
             return_complex=True,
             onesided=True,
         )
-        assert_eq(x3.shape, (B * self.frequency_features // 2, self.frequencies, 257))
-        x4 = x3.reshape(B, self.frequency_features // 2, self.frequencies, 257)
+        assert_eq(x3.shape, (B * self.frequency_features // 2, self.frequencies, 129))
+        x4 = x3.reshape(B, self.frequency_features // 2, self.frequencies, 129)
         x5 = torch.cat([torch.real(x4), torch.imag(x4)], dim=1)
-        assert_eq(x5.shape, (B, self.frequency_features, self.frequencies, 257))
+        assert_eq(x5.shape, (B, self.frequency_features, self.frequencies, 129))
 
-        x6 = x5.reshape(B, self.frequency_features * self.frequencies, 257)
+        x6 = x5.reshape(B, self.frequency_features * self.frequencies, 129)
 
         x7 = self.spectral_convs(x6)
         assert_eq(x7.shape, (B, self.fc_input_features, self.fc_input_length))
@@ -383,10 +405,10 @@ def train(
     assert isinstance(latent_features, int)
     assert isinstance(patch_size, int)
 
-    parallel_batch_size = 1  # 32
+    parallel_batch_size = 1
     sequential_batch_size = 1
 
-    n_critic = 5
+    n_critic = 3
     n_generator = 1
     n_all = n_critic + n_generator
 
@@ -505,17 +527,6 @@ def main():
 
     songs = load_audio_clips("input_sound/*.flac")
 
-    # features_lengths_kernel_sizes = [
-    #     (512, 1, 65),
-    #     (32, 64, 31),
-    #     (32, 256, 127),
-    #     (32, 1024, 127),
-    #     (32, 8192, 127),
-    #     (8, 16384, 127),
-    #     (4, 65536, 127),
-    #     (2, 65536, 1),
-    # ]
-
     patch_size = 65536
 
     latent_features = 64
@@ -523,7 +534,7 @@ def main():
     generator = Generator(num_latent_features=latent_features).cuda()
     discriminator = Discriminator().cuda()
 
-    lr = 1e-4
+    lr = 1e-3
 
     # generator_optimizer = torch.optim.RMSprop(
     generator_fc_optimizer = torch.optim.Adam(
