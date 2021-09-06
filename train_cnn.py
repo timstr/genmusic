@@ -83,13 +83,8 @@ class Generator(nn.Module):
         self.num_latent_features = num_latent_features
 
         self.temporal_features = 16
-<<<<<<< HEAD
-        self.frequency_features = 4
-        self.fc_output_length = 9
-=======
         self.frequency_features = 8
         self.fc_output_length = 33
->>>>>>> 84496f9f4fa97b4e21b00fa4c2a2e1009f4eb8a9
         self.fc_output_features = 32
         self.fc_hidden_features = 128
 
@@ -236,13 +231,8 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
 
         self.temporal_features = 16
-<<<<<<< HEAD
-        self.frequency_features = 4
-        self.fc_input_length = 9
-=======
         self.frequency_features = 8
         self.fc_input_length = 33
->>>>>>> 84496f9f4fa97b4e21b00fa4c2a2e1009f4eb8a9
         self.fc_input_features = 32
         self.fc_hidden_features = 128
 
