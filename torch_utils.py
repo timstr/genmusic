@@ -99,9 +99,9 @@ def prod(iterable, start=1):
     return reduce(lambda a, b: a * b, iterable, start)
 
 
-class ReshapeTensor(nn.Module):
+class Reshape(nn.Module):
     def __init__(self, input_shape, output_shape):
-        super(ReshapeTensor, self).__init__()
+        super(Reshape, self).__init__()
         assert isinstance(input_shape, tuple) or isinstance(input_shape, torch.Size)
         assert isinstance(output_shape, tuple) or isinstance(output_shape, torch.Size)
         assert prod(input_shape) == prod(output_shape)
@@ -116,6 +116,24 @@ class ReshapeTensor(nn.Module):
                 f"Reshape: expected input size {self._input_shape} but got {tuple(x.shape[1:])} instead"
             )
         return x.view(B, *self._output_shape)
+
+
+class CheckShape(nn.Module):
+    def __init__(self, expected_shape):
+        super(CheckShape, self).__init__()
+        assert isinstance(expected_shape, tuple) or isinstance(
+            expected_shape, torch.Size
+        )
+        self._expected_shape = expected_shape
+
+    def forward(self, x):
+        assert isinstance(x, torch.Tensor)
+        B = x.shape[0]
+        if x.shape[1:] != self._expected_shape:
+            raise Exception(
+                f"CheckShape: expected input size {self._expected_shape} but got {tuple(x.shape[1:])} instead"
+            )
+        return x
 
 
 class WithNoise1d(nn.Module):
@@ -134,6 +152,7 @@ class WithNoise1d(nn.Module):
         noise = -1.0 + 2.0 * torch.rand((B, F, N), dtype=x.dtype, device=x.device)
         weight = self.weights.reshape(1, F, 1)
         return x + weight * noise
+
 
 class WithNoise2d(nn.Module):
     def __init__(self, num_features):
