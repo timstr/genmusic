@@ -84,11 +84,11 @@ class Generator(nn.Module):
 
         self.temporal_features = 16
         self.frequency_features = 8
-        self.fc_output_length = 9
+        self.fc_output_length = 33
         self.fc_output_features = 32
         self.fc_hidden_features = 128
 
-        self.window_size = 512
+        self.window_size = 128
         self.window = nn.parameter.Parameter(
             data=torch.hann_window(self.window_size, periodic=True), requires_grad=False
         )
@@ -198,15 +198,15 @@ class Generator(nn.Module):
         assert_eq(x1.shape, (B, self.fc_output_features * self.fc_output_length))
         x2 = x1.reshape(B, self.fc_output_features, self.fc_output_length)
         x3 = self.spectral_convs(x2)
-        assert_eq(x3.shape, (B, self.frequency_features * self.frequencies, 65))
+        assert_eq(x3.shape, (B, self.frequency_features * self.frequencies, 257))
 
         x4 = torch.complex(
             real=x3[:, : (self.frequency_features * self.frequencies // 2)],
             imag=x3[:, (self.frequency_features * self.frequencies // 2) :],
         )
 
-        assert_eq(x4.shape, (B, self.frequency_features * self.frequencies // 2, 65))
-        x5 = x4.reshape(B * self.frequency_features // 2, self.frequencies, 65)
+        assert_eq(x4.shape, (B, self.frequency_features * self.frequencies // 2, 257))
+        x5 = x4.reshape(B * self.frequency_features // 2, self.frequencies, 257)
 
         x6 = torch.istft(
             input=x5,
@@ -232,11 +232,11 @@ class Discriminator(nn.Module):
 
         self.temporal_features = 16
         self.frequency_features = 8
-        self.fc_input_length = 9
+        self.fc_input_length = 33
         self.fc_input_features = 32
         self.fc_hidden_features = 128
 
-        self.window_size = 512
+        self.window_size = 128
         self.window = nn.parameter.Parameter(
             data=torch.hann_window(self.window_size, periodic=True), requires_grad=False
         )
@@ -329,12 +329,12 @@ class Discriminator(nn.Module):
             return_complex=True,
             onesided=True,
         )
-        assert_eq(x3.shape, (B * self.frequency_features // 2, self.frequencies, 65))
-        x4 = x3.reshape(B, self.frequency_features // 2, self.frequencies, 65)
+        assert_eq(x3.shape, (B * self.frequency_features // 2, self.frequencies, 257))
+        x4 = x3.reshape(B, self.frequency_features // 2, self.frequencies, 257)
         x5 = torch.cat([torch.real(x4), torch.imag(x4)], dim=1)
-        assert_eq(x5.shape, (B, self.frequency_features, self.frequencies, 65))
+        assert_eq(x5.shape, (B, self.frequency_features, self.frequencies, 257))
 
-        x6 = x5.reshape(B, self.frequency_features * self.frequencies, 65)
+        x6 = x5.reshape(B, self.frequency_features * self.frequencies, 257)
 
         x7 = self.spectral_convs(x6)
         assert_eq(x7.shape, (B, self.fc_input_features, self.fc_input_length))
@@ -347,12 +347,12 @@ class Discriminator(nn.Module):
 
 
 # HACK to test networks
-enable_log_layers()
-d = Discriminator().cuda()
-s = d(torch.rand((1, 2, 65536), device="cuda"))
-g = Generator(num_latent_features=64).cuda()
-a = g(torch.rand((1, 64), device="cuda"))
-exit(-1)
+# enable_log_layers()
+# d = Discriminator().cuda()
+# s = d(torch.rand((1, 2, 65536), device="cuda"))
+# g = Generator(num_latent_features=64).cuda()
+# a = g(torch.rand((1, 64), device="cuda"))
+# exit(-1)
 
 
 def random_initial_vector(batch_size, num_features):
@@ -531,8 +531,13 @@ def main():
         lr=(0.1 * lr),
         betas=(0.0, 0.99),
     )
-    generator_cnn_optimizer = torch.optim.Adam(
+    generator_tcnn_optimizer = torch.optim.Adam(
         generator.temporal_convs.parameters(),
+        lr=lr,
+        betas=(0.0, 0.99),
+    )
+    generator_scnn_optimizer = torch.optim.Adam(
+        generator.spectral_convs.parameters(),
         lr=lr,
         betas=(0.0, 0.99),
     )
@@ -543,8 +548,13 @@ def main():
         lr=(0.1 * lr),
         betas=(0.0, 0.99),
     )
-    discriminator_cnn_optimizer = torch.optim.Adam(
+    discriminator_tcnn_optimizer = torch.optim.Adam(
         discriminator.temporal_convs.parameters(),
+        lr=lr,
+        betas=(0.0, 0.99),
+    )
+    discriminator_scnn_optimizer = torch.optim.Adam(
+        discriminator.spectral_convs.parameters(),
         lr=lr,
         betas=(0.0, 0.99),
     )
@@ -560,16 +570,24 @@ def main():
             f"models/generator_fc_optimizer_{last_iteration}.dat",
         )
         restore_module(
-            generator_cnn_optimizer,
-            f"models/generator_cnn_optimizer_{last_iteration}.dat",
+            generator_tcnn_optimizer,
+            f"models/generator_tcnn_optimizer_{last_iteration}.dat",
+        )
+        restore_module(
+            generator_scnn_optimizer,
+            f"models/generator_scnn_optimizer_{last_iteration}.dat",
         )
         restore_module(
             discriminator_fc_optimizer,
             f"models/discriminator_fc_optimizer_{last_iteration}.dat",
         )
         restore_module(
-            discriminator_cnn_optimizer,
-            f"models/discriminator_cnn_optimizer_{last_iteration}.dat",
+            discriminator_tcnn_optimizer,
+            f"models/discriminator_tcnn_optimizer_{last_iteration}.dat",
+        )
+        restore_module(
+            discriminator_scnn_optimizer,
+            f"models/discriminator_scnn_optimizer_{last_iteration}.dat",
         )
     generator.train()
     discriminator.train()
@@ -621,16 +639,24 @@ def main():
             f"models/generator_fc_optimizer_{iteration + 1}.dat",
         )
         save_module(
-            generator_cnn_optimizer,
-            f"models/generator_cnn_optimizer_{iteration + 1}.dat",
+            generator_tcnn_optimizer,
+            f"models/generator_tcnn_optimizer_{iteration + 1}.dat",
+        )
+        save_module(
+            generator_scnn_optimizer,
+            f"models/generator_scnn_optimizer_{iteration + 1}.dat",
         )
         save_module(
             discriminator_fc_optimizer,
             f"models/discriminator_fc_optimizer_{iteration + 1}.dat",
         )
         save_module(
-            discriminator_cnn_optimizer,
-            f"models/discriminator_cnn_optimizer_{iteration + 1}.dat",
+            discriminator_tcnn_optimizer,
+            f"models/discriminator_tcnn_optimizer_{iteration + 1}.dat",
+        )
+        save_module(
+            discriminator_scnn_optimizer,
+            f"models/discriminator_scnn_optimizer_{iteration + 1}.dat",
         )
 
     current_iteration = 0 if last_iteration is None else last_iteration
@@ -645,10 +671,15 @@ def main():
                 all_audio_clips=songs,
                 generator=generator,
                 discriminator=discriminator,
-                generator_optimizers=[generator_fc_optimizer, generator_cnn_optimizer],
+                generator_optimizers=[
+                    generator_fc_optimizer,
+                    generator_tcnn_optimizer,
+                    generator_scnn_optimizer,
+                ],
                 discriminator_optimizers=[
                     discriminator_fc_optimizer,
-                    discriminator_cnn_optimizer,
+                    discriminator_tcnn_optimizer,
+                    discriminator_scnn_optimizer,
                 ],
                 latent_features=latent_features,
                 patch_size=patch_size,
