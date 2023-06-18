@@ -1,8 +1,9 @@
 import os
 
+from loss_plotter import LossPlotter
+
 os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torchaudio
@@ -27,54 +28,6 @@ from util import assert_eq, plt_screenshot
 from progress_bar import progress_bar
 
 
-class LossPlotter:
-    def __init__(self, aggregation_interval, colour, num_quantiles):
-        assert isinstance(aggregation_interval, int)
-        r, g, b = colour
-        assert isinstance(r, float)
-        assert isinstance(g, float)
-        assert isinstance(b, float)
-        assert isinstance(num_quantiles, int)
-        assert num_quantiles >= 1 and num_quantiles < aggregation_interval
-        self._colour_r = r
-        self._colour_g = g
-        self._colour_b = b
-        self._aggregation_interval = aggregation_interval
-        self._colour = colour
-        self._num_quantiles = num_quantiles
-        self._values = [[] for _ in range(num_quantiles + 1)]
-        self._acc = []
-
-    def append(self, item):
-        assert isinstance(item, float)
-        self._acc.append(item)
-        if len(self._acc) == self._aggregation_interval:
-            q = np.linspace(0.0, 1.0, num=(self._num_quantiles + 1))
-            qv = np.quantile(self._acc, q)
-            for i in range(self._num_quantiles + 1):
-                self._values[i].append(qv[i])
-            self._acc = []
-
-    def plot_to(self, plt_axis):
-        colour_dark = (self._colour_r, self._colour_g, self._colour_b)
-        if self._aggregation_interval > 1:
-            x_min = self._aggregation_interval // 2
-            x_stride = self._aggregation_interval
-            x_count = len(self._values[0])
-            x_values = range(x_min, x_min + x_count * x_stride, x_stride)
-            for i in range(self._num_quantiles):
-                t = i / self._num_quantiles
-                t = 2.0 * min(t, 1.0 - t)
-                c = (self._colour_r, self._colour_g, self._colour_b, t)
-                plt_axis.fill_between(
-                    x=x_values, y1=self._values[i], y2=self._values[i + 1], color=c
-                )
-        else:
-            plt_axis.scatter(
-                range(self._values[0]), self._items, s=1.0, color=colour_dark
-            )
-
-
 class Generator(nn.Module):
     def __init__(self, num_latent_features):
         super(Generator, self).__init__()
@@ -82,7 +35,7 @@ class Generator(nn.Module):
 
         self.num_latent_features = num_latent_features
 
-        self.temporal_features = 16
+        self.temporal_features = 8
         self.frequency_features = 8
         self.fc_output_length = 33
         self.fc_output_features = 32
@@ -96,30 +49,41 @@ class Generator(nn.Module):
         self.frequencies = (self.window_size // 2) + 1
         self.spectral_features = self.frequencies * self.frequency_features
 
-        def residual_block(in_features, hidden_features, out_features, kernel_size):
+        # def residual_block(in_features, hidden_features, out_features, kernel_size):
+        #     assert (kernel_size % 2) == 1
+        #     return ResidualAdd1d(
+        #         nn.Sequential(
+        #             nn.Conv1d(
+        #                 in_channels=in_features,
+        #                 out_channels=hidden_features,
+        #                 kernel_size=kernel_size,
+        #                 stride=1,
+        #                 padding=(kernel_size - 1) // 2,
+        #                 padding_mode="circular",
+        #             ),
+        #             nn.BatchNorm1d(num_features=hidden_features),
+        #             nn.LeakyReLU(0.2, True),
+        #             WithNoise1d(num_features=hidden_features),
+        #             nn.Conv1d(
+        #                 in_channels=hidden_features,
+        #                 out_channels=out_features,
+        #                 kernel_size=kernel_size,
+        #                 stride=1,
+        #                 padding=(kernel_size - 1) // 2,
+        #                 padding_mode="circular",
+        #             ),
+        #         )
+        #     )
+
+        def conv_up_2x(in_features, out_features, kernel_size, output_padding=0):
             assert (kernel_size % 2) == 1
-            return ResidualAdd1d(
-                nn.Sequential(
-                    nn.Conv1d(
-                        in_channels=in_features,
-                        out_channels=hidden_features,
-                        kernel_size=kernel_size,
-                        stride=1,
-                        padding=(kernel_size - 1) // 2,
-                        padding_mode="circular",
-                    ),
-                    nn.BatchNorm1d(num_features=hidden_features),
-                    nn.LeakyReLU(0.2),
-                    WithNoise1d(num_features=hidden_features),
-                    nn.Conv1d(
-                        in_channels=hidden_features,
-                        out_channels=out_features,
-                        kernel_size=kernel_size,
-                        stride=1,
-                        padding=(kernel_size - 1) // 2,
-                        padding_mode="circular",
-                    ),
-                )
+            return nn.ConvTranspose1d(
+                in_channels=in_features,
+                out_channels=out_features,
+                kernel_size=kernel_size,
+                stride=2,
+                output_padding=output_padding,
+                padding=(kernel_size - 1) // 2,
             )
 
         self.fully_connected = nn.Sequential(
@@ -130,7 +94,7 @@ class Generator(nn.Module):
                 out_features=self.fc_hidden_features,
             ),
             # nn.BatchNorm1d(num_features=self.fc_hidden_features),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
             Log("generator fully connected 1"),
             nn.Linear(
                 in_features=self.fc_hidden_features,
@@ -145,21 +109,35 @@ class Generator(nn.Module):
         self.spectral_convs = nn.Sequential(
             CheckShape((self.fc_output_features, 33)),
             Log("generator spectral conv 0"),
-            Resample1d(new_length=65),
-            residual_block(
+            # Resample1d(new_length=65),
+            # residual_block(
+            #     in_features=self.fc_output_features,
+            #     hidden_features=self.spectral_features,
+            #     out_features=self.spectral_features,
+            #     kernel_size=5,
+            # ),
+            conv_up_2x(
                 in_features=self.fc_output_features,
-                hidden_features=self.spectral_features,
                 out_features=self.spectral_features,
                 kernel_size=5,
             ),
+            nn.LeakyReLU(0.2, True),
+            WithNoise1d(num_features=self.spectral_features),
+            CheckShape((self.spectral_features, 65)),
             Log("generator spectral conv 1"),
-            Resample1d(new_length=129),
-            residual_block(
+            # Resample1d(new_length=129),
+            # residual_block(
+            #     in_features=self.spectral_features,
+            #     hidden_features=self.spectral_features,
+            #     out_features=self.spectral_features,
+            #     kernel_size=5,
+            # ),
+            conv_up_2x(
                 in_features=self.spectral_features,
-                hidden_features=self.spectral_features,
                 out_features=self.spectral_features,
                 kernel_size=5,
             ),
+            CheckShape((self.spectral_features, 129)),
             Log("generator spectral conv 2"),
         )
         # print("Generator spectral convolutions:")
@@ -169,29 +147,54 @@ class Generator(nn.Module):
         self.temporal_convs = nn.Sequential(
             CheckShape((self.frequency_features // 2, 8192)),
             Log("generator temporal conv 0"),
-            Resample1d(new_length=16384),
-            residual_block(
+            # Resample1d(new_length=16384),
+            # residual_block(
+            #     in_features=self.frequency_features // 2,
+            #     hidden_features=self.temporal_features,
+            #     out_features=self.temporal_features,
+            #     kernel_size=5,
+            # ),
+            conv_up_2x(
                 in_features=self.frequency_features // 2,
-                hidden_features=self.temporal_features,
                 out_features=self.temporal_features,
                 kernel_size=31,
+                output_padding=1,
             ),
+            nn.LeakyReLU(0.2, True),
+            WithNoise1d(num_features=self.temporal_features),
+            CheckShape((self.temporal_features, 16384)),
             Log("generator temporal conv 1"),
-            Resample1d(new_length=32768),
-            residual_block(
+            # Resample1d(new_length=32768),
+            # residual_block(
+            #     in_features=self.temporal_features,
+            #     hidden_features=self.temporal_features,
+            #     out_features=self.temporal_features,
+            #     kernel_size=5,
+            # ),
+            conv_up_2x(
                 in_features=self.temporal_features,
-                hidden_features=self.temporal_features,
                 out_features=self.temporal_features,
                 kernel_size=31,
+                output_padding=1,
             ),
+            CheckShape((self.temporal_features, 32768)),
+            nn.LeakyReLU(0.2, True),
+            WithNoise1d(num_features=self.temporal_features),
             Log("generator temporal conv 2"),
-            Resample1d(new_length=65536),
-            residual_block(
+            # Resample1d(new_length=65536),
+            # residual_block(
+            #     in_features=self.temporal_features,
+            #     hidden_features=self.temporal_features,
+            #     out_features=2,
+            #     kernel_size=5,
+            # ),
+            conv_up_2x(
                 in_features=self.temporal_features,
-                hidden_features=self.temporal_features,
                 out_features=2,
-                kernel_size=31,
+                kernel_size=5,
+                output_padding=1,
             ),
+            CheckShape((2, 65536)),
             Log("generator temporal conv 3"),
         )
         # print("Generator temporal convolutions")
@@ -237,14 +240,16 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self):
+    def __init__(self, num_latent_features):
         super(Discriminator, self).__init__()
+        assert isinstance(num_latent_features, int)
 
-        self.temporal_features = 16
+        self.temporal_features = 8
         self.frequency_features = 8
         self.fc_input_length = 33
         self.fc_input_features = 32
         self.fc_hidden_features = 128
+        self.num_latent_features = num_latent_features
 
         self.window_size = 128
         self.window = nn.parameter.Parameter(
@@ -267,10 +272,10 @@ class Discriminator(nn.Module):
         self.temporal_convs = nn.Sequential(
             Log("discriminator temporal conv 0"),
             conv_down_2x(
-                in_features=2, out_features=self.temporal_features, kernel_size=31
+                in_features=2, out_features=self.temporal_features, kernel_size=5
             ),
             nn.BatchNorm1d(num_features=self.temporal_features),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
             Log("discriminator temporal conv 1"),
             conv_down_2x(
                 in_features=self.temporal_features,
@@ -278,7 +283,7 @@ class Discriminator(nn.Module):
                 kernel_size=31,
             ),
             nn.BatchNorm1d(num_features=self.temporal_features),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
             Log("discriminator temporal conv 2"),
             conv_down_2x(
                 in_features=self.temporal_features,
@@ -300,7 +305,7 @@ class Discriminator(nn.Module):
                 kernel_size=5,
             ),
             nn.BatchNorm1d(num_features=self.spectral_features),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
             Log("discriminator spectral conv 1"),
             conv_down_2x(
                 in_features=self.spectral_features,
@@ -308,29 +313,38 @@ class Discriminator(nn.Module):
                 kernel_size=5,
             ),
             nn.BatchNorm1d(num_features=self.fc_input_features),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, True),
             Log("discriminator spectral conv 2"),
         )
         # print("Discriminator spectral convolutions:")
         # print(self.spectral_convs)
         # print("")
 
-        self.fully_connected = nn.Sequential(
-            Log("discriminator fully connected 0"),
+        self.fully_connected_latent = nn.Sequential(
+            Log("discriminator fully connected latent 0"),
             CheckShape((self.fc_input_features * self.fc_input_length,)),
             nn.Linear(
                 in_features=(self.fc_input_features * self.fc_input_length),
                 out_features=self.fc_hidden_features,
             ),
             # nn.BatchNorm1d(num_features=self.fc_hidden_features),
-            nn.LeakyReLU(0.2),
-            Log("discriminator fully connected 1"),
-            nn.Linear(in_features=self.fc_hidden_features, out_features=1),
-            Log("discriminator fully connected 2"),
+            nn.LeakyReLU(0.2, True),
+            Log("discriminator fully connected latent 1"),
+            nn.Linear(
+                in_features=self.fc_hidden_features,
+                out_features=self.num_latent_features,
+            ),
+            Log("discriminator fully connected latent 2"),
         )
         # print("Discriminator fully-connected:")
         # print(self.fully_connected)
         # print("")
+
+        self.fully_connected_score = nn.Sequential(
+            Log("discriminator fully connected score 0"),
+            nn.Linear(in_features=(self.num_latent_features), out_features=1,),
+            Log("discriminator fully connected score 1"),
+        )
 
     def forward(self, audio_clips):
         B, C, N = audio_clips.shape
@@ -362,15 +376,18 @@ class Discriminator(nn.Module):
         assert_eq(x7.shape, (B, self.fc_input_features, self.fc_input_length))
         x8 = x7.reshape(B, self.fc_input_features * self.fc_input_length)
 
-        x9 = self.fully_connected(x8)
-        assert_eq(x9.shape, (B, 1))
+        latent_features = self.fully_connected_latent(x8)
+        assert_eq(latent_features.shape, (B, self.num_latent_features))
 
-        return x9
+        score = self.fully_connected_score(latent_features)
+        assert_eq(score.shape, (B, 1))
+
+        return latent_features, score
 
 
 # HACK to test networks
 # enable_log_layers()
-# d = Discriminator().cuda()
+# d = Discriminator(num_latent_features=64).cuda()
 # s = d(torch.rand((1, 2, 65536), device="cuda"))
 # g = Generator(num_latent_features=64).cuda()
 # a = g(torch.rand((1, 64), device="cuda"))
@@ -378,12 +395,40 @@ class Discriminator(nn.Module):
 
 
 def random_initial_vector(batch_size, num_features):
-    return -1.0 + 2.0 * torch.randn(
-        (batch_size, num_features), dtype=torch.float32, device="cuda"
-    )
+    return torch.randn((batch_size, num_features), dtype=torch.float32, device="cuda")
     # return -1.0 + 2.0 * torch.rand(
     #     (batch_size, num_features, num_samples), dtype=torch.float32, device="cuda"
     # )
+
+
+# adapted from https://github.com/Lornatang/WassersteinGAN_GP-PyTorch/blob/f2e2659089a4fe4cb7e1c4edeb5c5b9912e9c348/wgangp_pytorch/utils.py#L39
+def calculate_gradient_penalty(model, real_images, fake_images):
+    device = real_images.device
+    """Calculates the gradient penalty loss for WGAN GP"""
+    # Random weight term for interpolation between real and fake data
+    alpha = torch.randn((real_images.size(0), 1, 1), device=device)
+    # Get random interpolation between real and fake data
+    interpolates = (alpha * real_images + ((1 - alpha) * fake_images)).requires_grad_(
+        True
+    )
+
+    features, model_interpolates = model(interpolates)
+    grad_outputs = torch.ones(
+        model_interpolates.size(), device=device, requires_grad=False
+    )
+
+    # Get gradient w.r.t. interpolates
+    gradients = torch.autograd.grad(
+        outputs=model_interpolates,
+        inputs=interpolates,
+        grad_outputs=grad_outputs,
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+    gradients = gradients.view(gradients.size(0), -1)
+    gradient_penalty = torch.mean((gradients.norm(2, dim=1) - 1) ** 2)
+    return gradient_penalty
 
 
 def train(
@@ -405,13 +450,14 @@ def train(
     assert isinstance(latent_features, int)
     assert isinstance(patch_size, int)
 
-    parallel_batch_size = 1
+    parallel_batch_size = 2
     sequential_batch_size = 1
 
-    n_critic = 3
+    n_critic = 5
     n_generator = 1
     n_all = n_critic + n_generator
 
+    latent_match_acc = 0.0
     generator_loss_fool_acc = 0.0
     generator_loss_sane_acc = 0.0
     discriminator_loss_real_acc = 0.0
@@ -425,8 +471,7 @@ def train(
         first_step = (i_batch % sequential_batch_size) == 0
         last_step = ((i_batch + 1) % sequential_batch_size) == 0
 
-        training_discriminator = mode < n_critic
-        training_generator = not training_discriminator
+        training_generator = mode >= n_critic
 
         with torch.no_grad():
             real_clips_batch = random_audio_batch(
@@ -436,21 +481,24 @@ def train(
             )
 
         initial_vector = random_initial_vector(
-            batch_size=parallel_batch_size,
-            num_features=latent_features,
+            batch_size=parallel_batch_size, num_features=latent_features,
         )
 
         fake_clips_batch = generator(initial_vector)
 
         # Assign scores to real and fake audio
-        discriminator_real_predictions = discriminator(real_clips_batch)
-        discriminator_fake_predictions = discriminator(fake_clips_batch)
+        discriminator_real_features, discriminator_real_scores = discriminator(
+            real_clips_batch
+        )
+        discriminator_fake_features, discriminator_fake_scores = discriminator(
+            fake_clips_batch
+        )
 
         total_loss = 0.0
 
         if training_generator:
             # generator wants to maximize the fake score
-            l_fool = -torch.mean(discriminator_fake_predictions)
+            l_fool = -torch.mean(discriminator_fake_scores)
             l_sane = sane_audio_loss(fake_clips_batch)
             total_loss += l_fool
             total_loss += l_sane
@@ -458,16 +506,30 @@ def train(
             optimizers = generator_optimizers
             generator_loss_fool_acc -= l_fool.detach().cpu().item()
             generator_loss_sane_acc += l_sane.detach().cpu().item()
-        if training_discriminator:
+        else:
             # discriminator wants to maximize the real score and minimize the fake score
-            l_real = -torch.mean(discriminator_real_predictions)
-            l_fake = torch.mean(discriminator_fake_predictions)
+            l_real = -torch.mean(discriminator_real_scores)
+            l_fake = torch.mean(discriminator_fake_scores)
             l = l_real + l_fake
             total_loss += l
             model = discriminator
             optimizers = discriminator_optimizers
             discriminator_loss_real_acc -= l_real.detach().cpu().item()
             discriminator_loss_fake_acc += l_fake.detach().cpu().item()
+
+            gradient_penalty = calculate_gradient_penalty(
+                discriminator, real_clips_batch, fake_clips_batch
+            )
+
+            total_loss += gradient_penalty
+
+            # discriminator latent features should match input latent features
+            # l_latent = torch.mean((discriminator_fake_features - initial_vector) ** 2)
+            # total_loss += l_latent
+            # latent_match_acc += l_latent.detach().cpu().item()
+
+            # also want all scores to not be arbitrarily large
+            # total_loss += 0.1 * (torch.mean(discriminator_real_scores**2) + torch.mean(discriminator_fake_scores**2))
 
         if first_step:
             for o in optimizers:
@@ -476,17 +538,18 @@ def train(
         total_loss.backward()
 
         if last_step:
-            for p in model.parameters():
-                if p.grad is not None:
-                    p.grad[...] /= sequential_batch_size
+            if sequential_batch_size > 1:
+                for p in model.parameters():
+                    if p.grad is not None:
+                        p.grad[...] /= sequential_batch_size
             for o in optimizers:
                 o.step()
 
-        if training_discriminator and last_step:
-            parameter_limit = 0.05
-            with torch.no_grad():
-                for p in discriminator.parameters():
-                    p.clamp_(min=-parameter_limit, max=parameter_limit)
+        # if last_step and not training_generator:
+        #     parameter_limit = 0.05
+        #     with torch.no_grad():
+        #         for p in discriminator.parameters():
+        #             p.clamp_(min=-parameter_limit, max=parameter_limit)
 
         # console_animation_characters = "-\\|/"
         # sys.stdout.write("\b")
@@ -498,11 +561,12 @@ def train(
         #     )
         # sys.stdout.flush()
 
+    latent_match_avg = latent_match_acc / sequential_batch_size
     generator_loss_fool_avg = generator_loss_fool_acc / (
-        sequential_batch_size * n_generator
+        sequential_batch_size * max(n_generator, 1)
     )
     generator_loss_sane_avg = generator_loss_sane_acc / (
-        sequential_batch_size * n_generator
+        sequential_batch_size * max(n_generator, 1)
     )
     discriminator_loss_real_avg = discriminator_loss_real_acc / (
         sequential_batch_size * n_critic
@@ -515,6 +579,7 @@ def train(
     # sys.stdout.flush()
 
     return (
+        latent_match_avg,
         generator_loss_fool_avg,
         generator_loss_sane_avg,
         discriminator_loss_real_avg,
@@ -529,76 +594,35 @@ def main():
 
     patch_size = 65536
 
-    latent_features = 64
+    latent_features = 32
 
     generator = Generator(num_latent_features=latent_features).cuda()
-    discriminator = Discriminator().cuda()
+    discriminator = Discriminator(num_latent_features=latent_features).cuda()
 
-    lr = 1e-3
+    num_generator_params = sum(p.numel() for p in generator.parameters())
+    num_discriminator_params = sum(p.numel() for p in discriminator.parameters())
 
-    # generator_optimizer = torch.optim.RMSprop(
-    generator_fc_optimizer = torch.optim.Adam(
-        generator.fully_connected.parameters(),
-        lr=(0.1 * lr),
-        betas=(0.0, 0.99),
-    )
-    generator_tcnn_optimizer = torch.optim.Adam(
-        generator.temporal_convs.parameters(),
-        lr=lr,
-        betas=(0.0, 0.99),
-    )
-    generator_scnn_optimizer = torch.optim.Adam(
-        generator.spectral_convs.parameters(),
-        lr=lr,
-        betas=(0.0, 0.99),
-    )
+    print(f"The generator has {num_generator_params} parameters")
+    print(f"The discriminator has {num_discriminator_params} parameters")
 
-    # discriminator_optimizer = torch.optim.RMSprop(
-    discriminator_fc_optimizer = torch.optim.Adam(
-        discriminator.fully_connected.parameters(),
-        lr=(0.1 * lr),
-        betas=(0.0, 0.99),
-    )
-    discriminator_tcnn_optimizer = torch.optim.Adam(
-        discriminator.temporal_convs.parameters(),
-        lr=lr,
-        betas=(0.0, 0.99),
-    )
-    discriminator_scnn_optimizer = torch.optim.Adam(
-        discriminator.spectral_convs.parameters(),
-        lr=lr,
-        betas=(0.0, 0.99),
-    )
+    lr = 0.00001
 
-    # last_iteration = 41705
+    generator_optimizer = torch.optim.RMSprop(generator.parameters(), lr=lr)
+
+    discriminator_optimizer = torch.optim.RMSprop(discriminator.parameters(), lr=lr)
+
+    # last_iteration = 113850
     last_iteration = None
 
     if last_iteration is not None:
         restore_module(generator, f"models/generator_{last_iteration}.dat")
         restore_module(discriminator, f"models/discriminator_{last_iteration}.dat")
         restore_module(
-            generator_fc_optimizer,
-            f"models/generator_fc_optimizer_{last_iteration}.dat",
+            generator_optimizer, f"models/generator_optimizer_{last_iteration}.dat",
         )
         restore_module(
-            generator_tcnn_optimizer,
-            f"models/generator_tcnn_optimizer_{last_iteration}.dat",
-        )
-        restore_module(
-            generator_scnn_optimizer,
-            f"models/generator_scnn_optimizer_{last_iteration}.dat",
-        )
-        restore_module(
-            discriminator_fc_optimizer,
-            f"models/discriminator_fc_optimizer_{last_iteration}.dat",
-        )
-        restore_module(
-            discriminator_tcnn_optimizer,
-            f"models/discriminator_tcnn_optimizer_{last_iteration}.dat",
-        )
-        restore_module(
-            discriminator_scnn_optimizer,
-            f"models/discriminator_scnn_optimizer_{last_iteration}.dat",
+            discriminator_optimizer,
+            f"models/discriminator_optimizer_{last_iteration}.dat",
         )
     generator.train()
     discriminator.train()
@@ -620,60 +644,43 @@ def main():
     plot_quantiles = 8
     sounds_per_plot = 4
 
+    latent_match_plotter = LossPlotter(loss_interval, (0.0, 0.0, 0.8), plot_quantiles)
     generator_loss_fool_plotter = LossPlotter(
         loss_interval, (0.8, 0.0, 0.0), plot_quantiles
     )
-    generator_loss_sane_plotter = LossPlotter(
-        loss_interval, (0.0, 0.2, 0.8), plot_quantiles
-    )
+    # generator_loss_sane_plotter = LossPlotter(
+    #     loss_interval, (0.0, 0.2, 0.8), plot_quantiles
+    # )
     discriminator_loss_real_plotter = LossPlotter(
         loss_interval, (0.0, 0.7, 0.0), plot_quantiles
     )
     discriminator_loss_fake_plotter = LossPlotter(
-        loss_interval, (0.8, 0.0, 0.0), plot_quantiles
+        loss_interval, (0.0, 0.4, 0.0), plot_quantiles
     )
-    discriminator_loss_combined_plotter = LossPlotter(
-        loss_interval, (0.8, 0.7, 0.0), plot_quantiles
-    )
+    # discriminator_loss_combined_plotter = LossPlotter(
+    #     loss_interval, (0.8, 0.7, 0.0), plot_quantiles
+    # )
 
     def save_things(iteration):
         save_module(
-            generator,
-            f"models/generator_{iteration + 1}.dat",
+            generator, f"models/generator_{iteration + 1}.dat",
         )
         save_module(
-            discriminator,
-            f"models/discriminator_{iteration + 1}.dat",
+            discriminator, f"models/discriminator_{iteration + 1}.dat",
         )
         save_module(
-            generator_fc_optimizer,
-            f"models/generator_fc_optimizer_{iteration + 1}.dat",
+            generator_optimizer, f"models/generator_optimizer_{iteration + 1}.dat",
         )
         save_module(
-            generator_tcnn_optimizer,
-            f"models/generator_tcnn_optimizer_{iteration + 1}.dat",
-        )
-        save_module(
-            generator_scnn_optimizer,
-            f"models/generator_scnn_optimizer_{iteration + 1}.dat",
-        )
-        save_module(
-            discriminator_fc_optimizer,
-            f"models/discriminator_fc_optimizer_{iteration + 1}.dat",
-        )
-        save_module(
-            discriminator_tcnn_optimizer,
-            f"models/discriminator_tcnn_optimizer_{iteration + 1}.dat",
-        )
-        save_module(
-            discriminator_scnn_optimizer,
-            f"models/discriminator_scnn_optimizer_{iteration + 1}.dat",
+            discriminator_optimizer,
+            f"models/discriminator_optimizer_{iteration + 1}.dat",
         )
 
     current_iteration = 0 if last_iteration is None else last_iteration
     try:
         for _ in range(1_000_000_000):
             (
+                latent_match,
                 generator_loss_fool,
                 generator_loss_sane,
                 discriminator_loss_real,
@@ -682,26 +689,19 @@ def main():
                 all_audio_clips=songs,
                 generator=generator,
                 discriminator=discriminator,
-                generator_optimizers=[
-                    generator_fc_optimizer,
-                    generator_tcnn_optimizer,
-                    generator_scnn_optimizer,
-                ],
-                discriminator_optimizers=[
-                    discriminator_fc_optimizer,
-                    discriminator_tcnn_optimizer,
-                    discriminator_scnn_optimizer,
-                ],
+                generator_optimizers=[generator_optimizer],
+                discriminator_optimizers=[discriminator_optimizer],
                 latent_features=latent_features,
                 patch_size=patch_size,
             )
+            latent_match_plotter.append(latent_match)
             generator_loss_fool_plotter.append(generator_loss_fool)
-            generator_loss_sane_plotter.append(generator_loss_sane)
+            # generator_loss_sane_plotter.append(generator_loss_sane)
             discriminator_loss_fake_plotter.append(discriminator_loss_fake)
             discriminator_loss_real_plotter.append(discriminator_loss_real)
-            discriminator_loss_combined_plotter.append(
-                discriminator_loss_real + discriminator_loss_fake
-            )
+            # discriminator_loss_combined_plotter.append(
+            #     discriminator_loss_real + discriminator_loss_fake
+            # )
 
             progress_bar(
                 current_iteration % plot_interval,
@@ -745,14 +745,10 @@ def main():
 
                 ax_bl.title.set_text(f"Fake Audio Waveform")
                 ax_bl.scatter(
-                    range(clip_to_plot.shape[1]),
-                    clip_to_plot[0].numpy(),
-                    s=1.0,
+                    range(clip_to_plot.shape[1]), clip_to_plot[0].numpy(), s=1.0,
                 )
                 ax_bl.scatter(
-                    range(clip_to_plot.shape[1]),
-                    clip_to_plot[1].numpy(),
-                    s=1.0,
+                    range(clip_to_plot.shape[1]), clip_to_plot[1].numpy(), s=1.0,
                 )
                 ax_bl.set_ylim(-1.0, 1.0)
 
@@ -768,15 +764,16 @@ def main():
                 ax_bm.imshow(rgb_spectrogram)
 
                 ax_tr.title.set_text("Generator Score")
+                latent_match_plotter.plot_to(ax_tr)
                 generator_loss_fool_plotter.plot_to(ax_tr)
-                generator_loss_sane_plotter.plot_to(ax_tr)
+                # generator_loss_sane_plotter.plot_to(ax_tr)
                 # ax_tr.set_xlim(-1, current_iteration + 1)
                 # ax_tr.set_yscale("log")
 
                 ax_br.title.set_text("Discriminator Scores")
                 discriminator_loss_fake_plotter.plot_to(ax_br)
                 discriminator_loss_real_plotter.plot_to(ax_br)
-                discriminator_loss_combined_plotter.plot_to(ax_br)
+                # discriminator_loss_combined_plotter.plot_to(ax_br)
                 # ax_br.set_xlim(-1, current_iteration + 1)
                 # ax_br.set_yscale("log")
 

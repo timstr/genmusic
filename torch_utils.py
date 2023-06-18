@@ -1,8 +1,11 @@
+import os
 from torch import fft
+import torchaudio
+import torchaudio.transforms
 from util import assert_eq
 import torch
 import torch.nn as nn
-import numpy as np
+import math
 from functools import reduce
 
 
@@ -18,6 +21,9 @@ def slice_along_dim(num_dims, dim, start=None, stop=None, step=None):
 
 def save_module(the_module, filename):
     print(f'Saving module to "{filename}"')
+    dirname = os.path.dirname(filename)
+    if not os.path.exists(dirname):
+        os.makedirs(dirname)
     torch.save(the_module.state_dict(), filename)
 
 
@@ -73,24 +79,33 @@ def make_conv_down(in_channels, out_channels, kernel_size, reduction_factor):
     )
 
 
-def make_positional_encoding(num_channels, length, device):
-    assert isinstance(num_channels, int)
+def make_positional_encoding(features, length, frequency_multiplier=1, device="cpu"):
+    assert isinstance(features, int)
     assert isinstance(length, int)
-    t = torch.tensor(
-        np.linspace(0.0, 1.0, num=length, endpoint=False),
+    assert isinstance(frequency_multiplier, int)
+    t = torch.linspace(
+        start=0.0,
+        end=((length - 1) / length),
+        steps=length,
         dtype=torch.float,
         device=device,
     )
-    f = torch.tensor(
-        np.linspace(1.0, 1.0 + num_channels, num=num_channels, endpoint=False),
+    f = torch.linspace(
+        start=1.0,
+        end=(features * frequency_multiplier),
+        steps=(features // 2),
         dtype=torch.float,
         device=device,
     )
 
-    tf = t.unsqueeze(0) * f.unsqueeze(1)
-    assert_eq(tf.shape, (num_channels, length))
+    phases = math.tau * t[None, :] * f[:, None]
+    assert phases.shape == (features // 2, length)
 
-    pos_enc = torch.sin(np.pi * tf)
+    pos_enc = torch.cat([torch.cos(phases), torch.sin(phases)], dim=0)
+
+    assert pos_enc.shape == (features, length)
+
+    pos_enc.requires_grad_(False)
 
     return pos_enc
 
@@ -149,7 +164,7 @@ class WithNoise1d(nn.Module):
         assert isinstance(x, torch.Tensor)
         B, F, N = x.shape
         assert_eq(F, self.num_features)
-        noise = -1.0 + 2.0 * torch.rand((B, F, N), dtype=x.dtype, device=x.device)
+        noise = torch.randn((B, F, N), dtype=x.dtype, device=x.device)
         weight = self.weights.reshape(1, F, 1)
         return x + weight * noise
 
@@ -167,7 +182,7 @@ class WithNoise2d(nn.Module):
         assert isinstance(x, torch.Tensor)
         B, F, H, W = x.shape
         assert_eq(F, self.num_features)
-        noise = -1.0 + 2.0 * torch.rand((B, F, H, W), dtype=x.dtype, device=x.device)
+        noise = torch.randn((B, F, H, W), dtype=x.dtype, device=x.device)
         weight = self.weights.reshape(1, F, 1, 1)
         return x + weight * noise
 
@@ -309,3 +324,59 @@ class ResidualAdd1d(nn.Module):
             return x[:, :F2] + y
         else:
             return torch.cat([x + y[:, :F1], y[:, F1:]], dim=1)
+
+
+class CircularPad1d(nn.Module):
+    def __init__(self, amount):
+        super(CircularPad1d, self).__init__()
+        assert isinstance(amount, int)
+        self.amount = amount
+
+    def forward(self, x):
+        batch_size, num_features, length = x.shape
+        assert length > self.amount
+        padded = torch.cat([x[:, :, -self.amount :], x, x[:, :, : self.amount],], dim=2)
+        assert padded.shape == (batch_size, num_features, length + (2 * self.amount))
+        return padded
+
+
+class CircularDownSampleAA(nn.Module):
+    def __init__(self, factor):
+        super(CircularDownSampleAA, self).__init__()
+        assert isinstance(factor, int)
+        self.pad_ratio = 16
+        self.factor = factor
+        self.pad = CircularPad1d(factor * self.pad_ratio)
+        self.transform = torchaudio.transforms.Resample(orig_freq=factor, new_freq=1)
+
+    def forward(self, x):
+        B, C, L = x.shape
+        padded = self.pad(x)
+        assert padded.shape == (B, C, L + 2 * self.pad_ratio * self.factor)
+        resampled = self.transform(padded)
+        assert resampled.shape == (B, C, L // self.factor + 2 * self.pad_ratio)
+        final = resampled[:, :, self.pad_ratio : -self.pad_ratio]
+        assert final.shape == (B, C, L // self.factor)
+        return final
+
+
+class CircularUpSampleAA(nn.Module):
+    def __init__(self, factor):
+        super(CircularUpSampleAA, self).__init__()
+        assert isinstance(factor, int)
+        self.pad_ratio = 16
+        self.factor = factor
+        self.pad = CircularPad1d(self.pad_ratio)
+        self.transform = torchaudio.transforms.Resample(orig_freq=1, new_freq=factor)
+
+    def forward(self, x):
+        B, C, L = x.shape
+        padded = self.pad(x)
+        assert padded.shape == (B, C, L + 2 * self.pad_ratio)
+        resampled = self.transform(padded)
+        assert resampled.shape == (B, C, (L + 2 * self.pad_ratio) * self.factor)
+        final = resampled[
+            :, :, (self.factor * self.pad_ratio) : -(self.factor * self.pad_ratio)
+        ]
+        assert final.shape == (B, C, L * self.factor)
+        return final

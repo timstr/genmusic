@@ -7,6 +7,7 @@ import numpy as np
 def make_spectrogram(x, normalize=True):
     assert len(x.shape) == 2
     assert x.shape[1] > x.shape[0]
+    x = x.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
     sgs = []
     for i in range(x.shape[0]):
         xi = x[i]
@@ -16,6 +17,7 @@ def make_spectrogram(x, normalize=True):
             nperseg=256,
             noverlap=128,
         )
+        sg = np.nan_to_num(sg, nan=0.0, posinf=0.0, neginf=0.0)
         sg = np.log(np.clip(np.abs(sg), a_min=1e-6, a_max=128))
         assert len(sg.shape) == 2
         sgs.append(torch.tensor(sg))
@@ -23,9 +25,12 @@ def make_spectrogram(x, normalize=True):
     if normalize:
         spectrogram_min = torch.min(spectrogram)
         spectrogram_max = torch.max(spectrogram)
-        spectrogram = (spectrogram - spectrogram_min) / (
-            spectrogram_max - spectrogram_min
-        )
+        if spectrogram_max > spectrogram_min:
+            spectrogram = (spectrogram - spectrogram_min) / (
+                spectrogram_max - spectrogram_min
+            )
+        else:
+            spectrogram.fill_(0.0)
     return spectrogram
 
 
