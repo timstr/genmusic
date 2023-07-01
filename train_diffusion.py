@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import random
 
 from loss_plotter import LossPlotter
-from torch_utils import CircularPad1d, save_module, restore_module
+from torch_utils import save_module, restore_module
 from audio_util import load_audio_clips, random_audio_batch
 from signal_processing import make_spectrogram
 from progress_bar import progress_bar
@@ -18,6 +18,7 @@ from util import plt_screenshot
 
 from audio_diffusion_net_v1 import AudioDiffusionNetV1
 from audio_diffusion_net_v2 import AudioDiffusionNetV2
+
 
 class UnaryModule(nn.Module):
     def __init__(self, function):
@@ -31,6 +32,7 @@ class UnaryModule(nn.Module):
 g_audio_length = 65536
 # g_audio_length = 16384
 
+
 def symmetric_log(x):
     sign = torch.sign(x)
     return sign * torch.log(torch.abs(x + sign))
@@ -38,34 +40,14 @@ def symmetric_log(x):
 
 device = torch.device("cuda")
 
-# adapted from https://www.youtube.com/watch?v=a4Yfz2FxXiY&t=772s&ab_channel=DeepFindr
+g_num_time_steps = 32
 
-g_num_time_steps = 100
-
-g_noise_schedule = torch.linspace(start=0.0001, end=0.1, steps=g_num_time_steps)
+g_noise_schedule = torch.linspace(start=0.0001, end=0.3, steps=g_num_time_steps)
 g_cumulative_noise_schedule = 1.0 - torch.cumprod(1.0 - g_noise_schedule, dim=0)
 
 if (1.0 - g_cumulative_noise_schedule[-1]) > 0.01:
     print("WARNING: final cumulative noise value is not close to one")
 
-# g_betas = torch.linspace(start=0.0001, end=0.2, steps=g_num_time_steps)
-# g_alphas = 1.0 - g_betas
-# g_alphas_cumprod = torch.cumprod(g_alphas, dim=0)
-# if g_alphas_cumprod[-1] > 0.01:
-#     print("WARNING: final alpha cumprod value is not close to zero")
-# g_alphas_cumprod_prev = nn.functional.pad(g_alphas_cumprod[:-1], (1, 0), value=1.0)
-# g_sqrt_recip_alphas = torch.sqrt(1.0 / g_alphas)
-# g_sqrt_alphas_cumprod = torch.sqrt(g_alphas_cumprod)
-# g_sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - g_alphas_cumprod)
-# g_posterior_variance = (
-#     g_betas * (1.0 - g_alphas_cumprod_prev) / (1.0 - g_alphas_cumprod)
-# )
-
-# import matplotlib.pyplot as plt
-# plt.plot(g_noise_schedule, c="r")
-# plt.plot(g_cumulative_noise_schedule, c="k")
-# plt.show()
-# exit(0)
 
 def forward_diffusion_sample(x_0):
     batch_size = x_0.shape[0]
@@ -100,29 +82,13 @@ def forward_diffusion_sample(x_0):
     return x_t, noise, time_steps_float
 
 
-
-    # sqrt_alphas_cumprod_t = torch.zeros((batch_size,))
-    # sqrt_one_minus_alphas_cumprod_t = torch.zeros((batch_size,))
-    # for i in range(batch_size):
-    #     sqrt_alphas_cumprod_t[i] = g_sqrt_alphas_cumprod[t[i]]
-    #     sqrt_one_minus_alphas_cumprod_t[i] = g_sqrt_one_minus_alphas_cumprod[t[i]]
-
-    # sqrt_alphas_cumprod_t = sqrt_alphas_cumprod_t[:, None, None]
-    # sqrt_one_minus_alphas_cumprod_t = sqrt_one_minus_alphas_cumprod_t[:, None, None]
-
-    # sqrt_alphas_cumprod_t = sqrt_alphas_cumprod_t.to(device=device)
-    # sqrt_one_minus_alphas_cumprod_t = sqrt_one_minus_alphas_cumprod_t.to(device=device)
-
-    # sqrt_alphas_cumprod_t.requires_grad_(False)
-    # sqrt_one_minus_alphas_cumprod_t.requires_grad_(False)
-
-    # noise = torch.randn_like(x_0)
-    # noise.requires_grad_(False)
-
-    # return (
-    #     ((sqrt_alphas_cumprod_t * x_0) + (sqrt_one_minus_alphas_cumprod_t * noise)),
-    #     noise,
-    # )
+def normalize_and_stuff(x):
+    x_var, x_mean = torch.var_mean(x, dim=2, keepdim=True)
+    x = (x - x_mean) / torch.sqrt(x_var.clamp(min=1.0))
+    max_val = torch.max(torch.abs(x), dim=2, keepdim=True)[0]
+    max_max_val = 1.5
+    x = x * (max_max_val / max_val.clamp(min=max_max_val))
+    return x
 
 
 @torch.no_grad()
@@ -131,35 +97,20 @@ def sample_timestep(model, x, t):
     assert x.shape == (batch_size, 2, g_audio_length)
     assert isinstance(t, int)
 
-    # betas_t = g_betas[t].item()
-    # sqrt_one_minus_alphas_cumprod_t = g_sqrt_one_minus_alphas_cumprod[t].item()
-    # sqrt_recip_alphas_t = g_sqrt_recip_alphas[t].item()
-    # # sigma_t = math.sqrt(g_posterior_variance[t].item())
-    # sigma_t = 0.1 * betas_t
-    # # sigma_t = 0.1 * betas_t
     t_0_to_1 = t / (g_num_time_steps - 1)
 
-    # betas_t = torch.full((batch_size, 1, 1), fill_value=betas_t, device=device)
-    # sqrt_one_minus_alphas_cumprod_t = torch.full(
-    #     (batch_size, 1, 1), fill_value=sqrt_one_minus_alphas_cumprod_t, device=device
-    # )
-    # sqrt_recip_alphas_t = torch.full(
-    #     (batch_size, 1, 1), fill_value=sqrt_recip_alphas_t, device=device
-    # )
-    # sigma_t = torch.full((batch_size, 1, 1), fill_value=sigma_t, device=device)
     t_0_to_1 = torch.full((batch_size,), fill_value=t_0_to_1, device=device)
 
     model_prediction = model(x, t_0_to_1)
 
-    # HACK normalizing model prediction
-    # pred_var, pred_mean = torch.var_mean(model_prediction, dim=2, keepdim=True)
-    # model_prediction = (model_prediction - pred_mean) / torch.sqrt(pred_var.clamp(min=1.0))
+    # HACK
+    model_prediction = normalize_and_stuff(model_prediction)
 
     # if predicting the signal
-    clean_prediction, predicted_noise = model_prediction, (x - model_prediction)
+    # clean_prediction, predicted_noise = model_prediction, (x - model_prediction)
 
     # if predicting the noise
-    # clean_prediction, predicted_noise = (x - model_prediction), model_prediction
+    clean_prediction, predicted_noise = (x - model_prediction), model_prediction
 
     if t == 0:
         x_predicted = clean_prediction
@@ -176,6 +127,9 @@ def sample_timestep(model, x, t):
 
         x_predicted = renoised
 
+    # HACK
+    x_predicted = normalize_and_stuff(x_predicted)
+
     assert x_predicted.shape == (batch_size, 2, g_audio_length)
     return x_predicted, predicted_noise
 
@@ -190,7 +144,6 @@ def sample(model, batch_size, steps_per_intermediate=None, gather_noise_stats=Fa
     sample_stats = []
 
     for t in range(0, g_num_time_steps)[::-1]:
-        # print(t)
         x, pred_noise = sample_timestep(model=model, x=x, t=t)
         if gather_noise_stats:
             pred_min = torch.min(pred_noise)
@@ -220,17 +173,9 @@ def sample(model, batch_size, steps_per_intermediate=None, gather_noise_stats=Fa
             x_mean = x_mean.item()
             x_max = x_max.item()
             sample_stats.append(
-                [
-                    x_min,
-                    x_mean - x_stddev,
-                    x_mean,
-                    x_mean + x_stddev,
-                    x_max,
-                ]
+                [x_min, x_mean - x_stddev, x_mean, x_mean + x_stddev, x_max,]
             )
 
-        # x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-        # x = torch.clamp(x, min=-10.0, max=10.0)
         if steps_per_intermediate and (t % steps_per_intermediate == 0):
             intermediates.append(x)
 
@@ -241,75 +186,33 @@ def sample(model, batch_size, steps_per_intermediate=None, gather_noise_stats=Fa
 
 
 def train(
-    model,
-    optimizer,
-    batch,
-    plot_activations,
+    model, optimizer, batch, plot_activations,
 ):
     model.train()
     batch_size = batch.shape[0]
 
-    # t = torch.rand((batch_size,), device=device)
-    # sigmas = sigma_start + t * (sigma_end - sigma_start)
-    # s = torch.exp(sigmas)
-    # noise = s.reshape(batch_size, 1, 1) * torch.randn_like(batch, device=device)
-    # noise.requires_grad_(False)
-    # noisy_batch = batch + noise
-
-    # t_0_to_1 = torch.zeros((batch_size,))
-    # t = []
-    # for i in range(batch_size):
-    #     t_i = random.randrange(0, g_num_time_steps)
-    #     t.append(t_i)
-    #     t_0_to_1[i] = t_i / (g_num_time_steps - 1)
-    # t_0_to_1 = t_0_to_1.to(device=device)
-
-    # Hmmm it appears that by NOT scaling the noise here, the loss function gives
-    # equal treatment to both high and low variances found at different ends of
-    # the diffusion process.
     noisy_batch, noise, t = forward_diffusion_sample(x_0=batch)
 
     prediction = model(noisy_batch, t, plot_activations=plot_activations)
 
     # if predicting the signal
-    error = prediction - batch
+    # error = prediction - batch
 
     # if predicting the noise
-    # error = prediction - noise
+    error = prediction - noise
 
-    loss_wrt_t = torch.mean(
-        torch.mean(torch.square(error), dim=-1), dim=-1
-    )
+    loss_wrt_t = torch.mean(torch.mean(torch.square(error), dim=-1), dim=-1)
     assert loss_wrt_t.shape == (batch_size,)
     loss = torch.mean(loss_wrt_t)
-    # loss = torch.mean(torch.abs(predicted_noise - noise))
+
     optimizer.zero_grad()
     loss.backward()
 
     # nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.000000000001)
-    nn.utils.clip_grad_value_(model.parameters(), clip_value=0.1) # Hmmm this makes an interesting difference
+    nn.utils.clip_grad_value_(model.parameters(), clip_value=0.001)
 
     optimizer.step()
     return loss.item(), t.detach().cpu(), loss_wrt_t.detach().cpu()
-
-
-class DummyModel(nn.Module):
-    def __init__(self):
-        super(DummyModel, self).__init__()
-        self.convs = nn.Sequential(
-            CircularPad1d(1),
-            nn.Conv1d(
-                in_channels=2,
-                out_channels=2,
-                kernel_size=3,
-                stride=1,
-                # padding=1,
-                # padding_mode="circular",
-            ),
-        )
-
-    def forward(self, x, t):
-        return self.convs(x)
 
 
 def main():
@@ -330,28 +233,11 @@ def main():
                 progress_bar(i, len(all_audio_clips), "clips resampled")
         all_audio_clips = all_resampled_clips
 
-    # HACK
-    # all_audio_clips = all_audio_clips[:1]
-    # all_audio_clips = all_audio_clips[417:418]
-    # HACKKK
-    # all_audio_clips[0][0][...] *= 0.0
-
-    # HACKKKKK
-    # all_audio_clips_tensor = torch.cat(
-    #     [audio for audio, _name in all_audio_clips], dim=1
-    # )
-    # assert all_audio_clips_tensor.ndim == 2
-    # assert all_audio_clips_tensor.shape[0] == 2
-    # audio_var, audio_mean = torch.var_mean(all_audio_clips_tensor, dim=1)
-    # print(f"audio_var = {audio_var}")
-    # print(f"audio_mean = {audio_mean}")
-    # exit(0)
     dataset_mean = 0.0
     # dataset_stddev = 0.1
     dataset_stddev = 1.0
 
     # HACKKKK
-    # model = DummyModel().to(device=device)
     # model = AudioDiffusionNetV1().to(device=device)
     model = AudioDiffusionNetV2().to(device=device)
 
@@ -360,22 +246,17 @@ def main():
         num_params += p.numel()
     print(f"The model has {num_params} parameters")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     # torch.set_anomaly_enabled(True)
 
-    # Chosen by bypassing model and using perfect noise predictions
-    # Produces a smooth result over time assuming an exponential noise schedule
-    # sigma_start = 0
-    # sigma_end = -10
-
     # batch_size = 128
     # batch_size = 32
-    # batch_size = 16
-    batch_size = 4
+    batch_size = 16
+    # batch_size = 4
 
     pickup_iteration = None
-    # pickup_iteration = 4459
+    # pickup_iteration = 72192
 
     plt.ion()
 
@@ -474,8 +355,6 @@ def main():
                 model=model,
                 optimizer=optimizer,
                 batch=batch,
-                # sigma_start=sigma_start,
-                # sigma_end=sigma_end,
                 plot_activations=time_to_plot,
             )
 
@@ -502,28 +381,21 @@ def main():
             if time_to_plot:
                 with torch.no_grad():
                     output_clips, noise_stats, sample_stats = sample(
-                        model=model,
-                        batch_size=sounds_per_plot,
-                        gather_noise_stats=True
-                        # steps=100,
-                        # sigma_start=sigma_start,
-                        # sigma_end=sigma_end,
+                        model=model, batch_size=sounds_per_plot, gather_noise_stats=True
                     )
                     assert output_clips.shape == (sounds_per_plot, 2, g_audio_length,)
                     output_clips = (output_clips * dataset_stddev) + dataset_mean
                     output_clips = output_clips.cpu()
 
-                    intermediates_batch, _, _= sample(
+                    intermediates_batch, _, _ = sample(
                         model=model,
                         batch_size=3,
-                        # steps=100,
-                        # sigma_start=sigma_start,
-                        # sigma_end=sigma_end,
                         steps_per_intermediate=(g_num_time_steps // 10),
                         gather_noise_stats=False,
                     )
-                    assert intermediates_batch.shape == (3, 10, 2, g_audio_length)
-                    intermediates_batch = (intermediates_batch * dataset_stddev) + dataset_mean
+                    intermediates_batch = (
+                        intermediates_batch * dataset_stddev
+                    ) + dataset_mean
                     intermediates_batch = intermediates_batch.cpu()
 
                 audio_clip, song_name = random.choice(all_audio_clips)
@@ -616,7 +488,9 @@ def main():
                 ax_brr.plot(-g_cumulative_noise_schedule.flip(0), "k--")
                 ax_brr.plot(g_noise_schedule.flip(0), "r--")
                 ax_brr.plot(-g_noise_schedule.flip(0), "r--")
-                sample_q0s, sample_q1s, sample_q2s, sample_q3s, sample_q4s = zip(*sample_stats)
+                sample_q0s, sample_q1s, sample_q2s, sample_q3s, sample_q4s = zip(
+                    *sample_stats
+                )
                 ax_brr.plot(sample_q0s, color=(0.0, 0.0, 0.0, 0.5), linewidth=1)
                 ax_brr.plot(sample_q1s, color=(0.0, 0.0, 0.0, 0.5), linewidth=2)
                 ax_brr.plot(sample_q2s, color=(0.0, 0.0, 0.0, 0.5), linewidth=4)

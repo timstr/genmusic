@@ -2,52 +2,49 @@ import math
 import torch
 import torch.nn as nn
 
-from torch_utils import CircularDownSampleAA, CircularUpSampleAA, CircularPad1d, make_positional_encoding
+from torch_utils import CircularDownSampleAA, CircularUpSampleAA, make_positional_encoding
 
 
 def _make_convolutional_layers(
-    input_features, hidden_features, output_features, num_layers=1
+    input_features, hidden_features, output_features, num_layers=2
 ):
     kernel_size = 15
     padding = (kernel_size - 1) // 2
     modules = [
-        CircularPad1d(amount=padding),
         nn.Conv1d(
             in_channels=input_features,
             out_channels=hidden_features,
             kernel_size=kernel_size,
-            # padding=padding,
-            # padding_mode="zeros",
+            padding=padding,
+            padding_mode="circular",
             stride=1,
         ),
         nn.BatchNorm1d(num_features=hidden_features),
-        nn.GELU(),
+        nn.ReLU(),
     ]
     for _ in range(num_layers - 1):
         modules.extend(
             [
-                CircularPad1d(amount=padding),
                 nn.Conv1d(
                     in_channels=hidden_features,
                     out_channels=hidden_features,
                     kernel_size=kernel_size,
-                    # padding=padding,
-                    # padding_mode="zeros",
+                    padding=padding,
+                    padding_mode="circular",
                     stride=1,
                 ),
                 nn.BatchNorm1d(num_features=hidden_features),
-                nn.GELU(),
+                nn.ReLU(),
             ]
         )
     modules.extend(
         [
-            CircularPad1d(amount=padding),
             nn.Conv1d(
                 in_channels=hidden_features,
                 out_channels=output_features,
                 kernel_size=kernel_size,
-                # padding=padding,
-                # padding_mode="zeros",
+                padding=padding,
+                padding_mode="circular",
                 stride=1,
             ),
         ]
@@ -55,15 +52,26 @@ def _make_convolutional_layers(
     return nn.Sequential(*modules)
 
 
-def _add_positional_encoding(x):
+def _add_timestep_positional_encoding(x, t):
+    assert isinstance(x, torch.Tensor)
+    assert isinstance(t, torch.Tensor)
     batch_size, features, length = x.shape
-    pos_enc = make_positional_encoding(
-        features=features,
-        length=length,
-        frequency_multiplier=1,
-        device=x.device
+    assert t.shape == (batch_size,)
+    # assumption: t ranges from 0 to 1
+    frequencies = torch.linspace(
+        start=1.0,
+        end=(features//2),
+        steps=(features//2),
+        dtype=torch.float32,
+        device=x.device,
     )
-    return x + pos_enc[None]
+    phases = math.tau * frequencies[None, :] * t[:, None]
+    pos_enc = torch.cat(
+        [torch.cos(phases), torch.sin(phases)], dim=1
+    )
+    assert pos_enc.shape == (batch_size, features)
+    pos_enc.requires_grad_(False)
+    return x + pos_enc[:, :, None]
 
 g_plot_count = 0
 
@@ -222,38 +230,17 @@ class AudioDiffusionNetV2(nn.Module):
 
         x0 = f(self.initial_cnn(f(x)))
 
-        x1 = f(self.down_cnn_1(self.downsample_1(x0)))
-        x2 = f(self.down_cnn_2(self.downsample_2(x1)))
-        x3 = f(self.down_cnn_3(self.downsample_3(x2)))
-        x4 = f(self.down_cnn_4(self.downsample_4(x3)))
-        x5 = f(self.down_cnn_5(self.downsample_5(x4)))
-        x6 = f(self.down_cnn_6(self.downsample_6(x5)))
-        x7 = f(self.down_cnn_7(self.downsample_7(x6)))
-        x8 = f(self.down_cnn_8(self.downsample_8(x7)))
-        z = f(self.down_cnn_9(self.downsample_9(x8)))
+        x1 = f(self.down_cnn_1(_add_timestep_positional_encoding(self.downsample_1(x0), t)))
+        x2 = f(self.down_cnn_2(_add_timestep_positional_encoding(self.downsample_2(x1), t)))
+        x3 = f(self.down_cnn_3(_add_timestep_positional_encoding(self.downsample_3(x2), t)))
+        x4 = f(self.down_cnn_4(_add_timestep_positional_encoding(self.downsample_4(x3), t)))
+        x5 = f(self.down_cnn_5(_add_timestep_positional_encoding(self.downsample_5(x4), t)))
+        x6 = f(self.down_cnn_6(_add_timestep_positional_encoding(self.downsample_6(x5), t)))
+        x7 = f(self.down_cnn_7(_add_timestep_positional_encoding(self.downsample_7(x6), t)))
+        x8 = f(self.down_cnn_8(_add_timestep_positional_encoding(self.downsample_8(x7), t)))
+        z = f(self.down_cnn_9(_add_timestep_positional_encoding(self.downsample_9(x8), t)))
 
-        hidden_features = z.shape[1]
-        hidden_length = z.shape[2]
-
-        t_frequencies = torch.linspace(
-            start=1.0,
-            end=hidden_features,
-            steps=(hidden_features // 2),
-            device=z.device,
-        )
-
-        t_phases = math.tau * t[:, None] * t_frequencies[None, :]
-        assert t_phases.shape == (batch_size, (hidden_features // 2))
-
-        t_positional_encoding = torch.cat(
-            [torch.cos(t_phases), torch.sin(t_phases)], dim=1
-        )
-        assert t_positional_encoding.shape == (batch_size, hidden_features)
-        t_positional_encoding.requires_grad_(False)
-
-        z_and_t = z + t_positional_encoding[:, :, None]
-
-        y8 = f(x8 + self.upsample_9(self.up_cnn_9(z_and_t + self.pe_9)))
+        y8 = f(x8 + self.upsample_9(self.up_cnn_9(z + self.pe_9)))
         y7 = f(x7 + self.upsample_8(self.up_cnn_8(y8 + self.pe_8)))
         y6 = f(x6 + self.upsample_7(self.up_cnn_7(y7 + self.pe_7)))
         y5 = f(x5 + self.upsample_6(self.up_cnn_6(y6 + self.pe_6)))
